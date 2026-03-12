@@ -1,0 +1,1221 @@
+<!DOCTYPE html>
+<html lang="en">
+<!--
+  SpotterIQ — Yard Command  v2.0.0
+  A FleetSource IQ Platform Product
+  MyGeotab Add-in | Handshake: geotab.addin.spotterIQ
+  ─────────────────────────────────────────────────────
+  MYGEOTAB COMPATIBILITY NOTES:
+  • Zero external dependencies — no Google Fonts, no CDNs
+  • Uses only api.call / api.multiCall (no fetch/XHR to Geotab)
+  • initialize() calls callback() synchronously
+  • ES5-safe var declarations; no import/export
+  • Inline SVG icons — no icon fonts needed
+  • All CSS variables with IE11 fallbacks where critical
+  • Group-aware: Geotab API auto-filters to the logged-in
+    user's assigned group — no per-customer code changes needed
+-->
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SpotterIQ — Yard Command</title>
+  <style>
+    /* ═══════════════════════════════════════════════════════
+       DESIGN TOKENS — Industrial Command Center
+       Phosphor-green on near-black, amber accents
+    ═══════════════════════════════════════════════════════ */
+    :root {
+      --bg:          #0a0c0f;
+      --bg2:         #111418;
+      --bg3:         #181c22;
+      --border:      #1e2530;
+      --border-hl:   #2a3545;
+
+      --green:       #00e676;
+      --green-dim:   #00b85c;
+      --green-glow:  rgba(0,230,118,.18);
+      --amber:       #ffab00;
+      --amber-dim:   #e69500;
+      --amber-glow:  rgba(255,171,0,.18);
+      --red:         #ff4444;
+      --red-glow:    rgba(255,68,68,.18);
+      --blue:        #40a9ff;
+      --blue-glow:   rgba(64,169,255,.15);
+      --muted:       #4a5568;
+      --text:        #c8d3e0;
+      --text-bright: #eef2f7;
+
+      /* Monospace stack guaranteed in Windows/MyGeotab */
+      --font-mono:  'Courier New', 'Lucida Console', monospace;
+      --font-ui:    'Segoe UI', 'Tahoma', sans-serif;
+    }
+
+    /* ── Reset ─────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      width: 100%; height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font-ui);
+      font-size: 13px;
+      overflow-x: hidden;
+    }
+
+    /* ── Scanline overlay — pure CSS, no images ─────────── */
+    body::before {
+      content: '';
+      position: fixed; inset: 0; pointer-events: none; z-index: 9999;
+      background: repeating-linear-gradient(
+        0deg,
+        transparent,
+        transparent 2px,
+        rgba(0,0,0,.06) 2px,
+        rgba(0,0,0,.06) 4px
+      );
+    }
+
+    /* ════════════════════════════════════════════════════
+       CONNECTION OVERLAY
+    ════════════════════════════════════════════════════ */
+    #overlay {
+      position: fixed; inset: 0; z-index: 1000;
+      background: var(--bg);
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      gap: 24px;
+      transition: opacity .5s ease;
+    }
+    #overlay.hidden { opacity: 0; pointer-events: none; }
+
+    .ov-logo {
+      font-family: var(--font-mono);
+      font-size: 11px; font-weight: 700;
+      letter-spacing: .35em;
+      color: var(--green);
+      text-shadow: 0 0 12px var(--green);
+    }
+    .ov-title {
+      font-family: var(--font-mono);
+      font-size: 26px; font-weight: 700;
+      letter-spacing: .2em;
+      color: var(--text-bright);
+    }
+    .ov-status {
+      font-family: var(--font-mono);
+      font-size: 12px; letter-spacing: .15em;
+      color: var(--green);
+      animation: blink 1.2s step-end infinite;
+    }
+    .ov-error { display: none; flex-direction: column; align-items: center; gap: 16px; }
+    .ov-error.show { display: flex; }
+    .ov-error-icon { font-size: 36px; }
+    .ov-error-msg {
+      font-family: var(--font-mono); font-size: 13px;
+      color: var(--red); letter-spacing: .1em;
+    }
+    .retry-btn {
+      font-family: var(--font-mono); font-size: 12px; letter-spacing: .15em;
+      padding: 10px 28px;
+      background: transparent; border: 1px solid var(--red);
+      color: var(--red); cursor: pointer;
+      transition: background .2s, color .2s;
+    }
+    .retry-btn:hover { background: var(--red); color: var(--bg); }
+
+    /* ── Dot matrix loading animation ─────────────────── */
+    .dot-loader { display: flex; gap: 6px; }
+    .dot-loader span {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--green);
+      animation: pulse-dot 1.4s ease-in-out infinite;
+    }
+    .dot-loader span:nth-child(2) { animation-delay: .2s; }
+    .dot-loader span:nth-child(3) { animation-delay: .4s; }
+
+    @keyframes pulse-dot {
+      0%, 80%, 100% { opacity: .2; transform: scale(.8); }
+      40%           { opacity: 1;  transform: scale(1);   }
+    }
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50%      { opacity: 0; }
+    }
+
+    /* ════════════════════════════════════════════════════
+       MAIN SHELL
+    ════════════════════════════════════════════════════ */
+    #app { display: none; flex-direction: column; min-height: 100vh; }
+    #app.show { display: flex; }
+
+    /* ── Top Bar ─────────────────────────────────────── */
+    .topbar {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 12px 20px;
+      background: var(--bg2);
+      border-bottom: 1px solid var(--border);
+    }
+    .topbar-left  { display: flex; align-items: center; gap: 16px; }
+    .topbar-right { display: flex; align-items: center; gap: 10px; }
+
+    .brand {
+      font-family: var(--font-mono); font-size: 10px; font-weight: 700;
+      letter-spacing: .35em; color: var(--green);
+      text-shadow: 0 0 8px var(--green-glow);
+    }
+    .brand-title {
+      font-family: var(--font-mono); font-size: 15px; font-weight: 700;
+      letter-spacing: .2em; color: var(--text-bright);
+    }
+    .live-pill {
+      display: flex; align-items: center; gap: 6px;
+      padding: 4px 10px;
+      border: 1px solid var(--green-dim);
+      font-family: var(--font-mono); font-size: 10px; letter-spacing: .15em;
+      color: var(--green);
+    }
+    .live-dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: var(--green);
+      box-shadow: 0 0 6px var(--green);
+      animation: pulse-dot 1.8s ease-in-out infinite;
+    }
+
+    .ctrl-label {
+      font-family: var(--font-mono); font-size: 10px;
+      letter-spacing: .12em; color: var(--muted);
+    }
+    select, button {
+      background: var(--bg3); border: 1px solid var(--border-hl);
+      color: var(--text); font-family: var(--font-ui); font-size: 12px;
+      padding: 6px 10px; cursor: pointer;
+      transition: border-color .15s;
+    }
+    select:hover, button:hover { border-color: var(--green-dim); }
+    .refresh-btn {
+      display: flex; align-items: center; gap: 6px;
+      padding: 6px 14px;
+      border-color: var(--green-dim); color: var(--green);
+      font-family: var(--font-mono); font-size: 11px; letter-spacing: .1em;
+      font-weight: 700;
+    }
+    .refresh-btn:hover { background: var(--green-glow); }
+
+    .last-refresh {
+      font-family: var(--font-mono); font-size: 10px;
+      color: var(--muted); letter-spacing: .08em;
+    }
+
+    /* ── KPI Strip ───────────────────────────────────── */
+    .kpi-strip {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      border-bottom: 1px solid var(--border);
+    }
+    .kpi {
+      padding: 14px 20px;
+      border-right: 1px solid var(--border);
+      position: relative;
+      overflow: hidden;
+    }
+    .kpi:last-child { border-right: none; }
+    .kpi::after {
+      content: '';
+      position: absolute; bottom: 0; left: 0; right: 0; height: 2px;
+      background: var(--green); opacity: 0;
+      transition: opacity .3s;
+    }
+    .kpi.loaded::after { opacity: 1; }
+    .kpi-label {
+      font-family: var(--font-mono); font-size: 9px;
+      letter-spacing: .2em; color: var(--muted);
+      text-transform: uppercase;
+    }
+    .kpi-value {
+      font-family: var(--font-mono); font-size: 28px; font-weight: 700;
+      color: var(--green); line-height: 1;
+      text-shadow: 0 0 10px var(--green-glow);
+      margin: 4px 0 2px;
+    }
+    .kpi-sub {
+      font-family: var(--font-mono); font-size: 9px;
+      color: var(--muted); letter-spacing: .08em;
+    }
+
+    /* ── State Tiles ─────────────────────────────────── */
+    .state-grid {
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      border-bottom: 1px solid var(--border);
+    }
+    .state-tile {
+      padding: 10px 16px;
+      border-right: 1px solid var(--border);
+      display: flex; align-items: center; gap: 10px;
+      cursor: pointer; transition: background .15s;
+    }
+    .state-tile:last-child { border-right: none; }
+    .state-tile:hover { background: var(--bg3); }
+    .state-tile.active { background: var(--bg3); border-bottom: 2px solid var(--green); }
+
+    .tile-dot {
+      width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0;
+    }
+    .tile-dot.green  { background: var(--green);  box-shadow: 0 0 5px var(--green); }
+    .tile-dot.amber  { background: var(--amber);  box-shadow: 0 0 5px var(--amber); }
+    .tile-dot.blue   { background: var(--blue);   box-shadow: 0 0 5px var(--blue);  }
+    .tile-dot.red    { background: var(--red);    box-shadow: 0 0 5px var(--red);   }
+    .tile-dot.muted  { background: var(--muted); }
+    .tile-dot.dim    { background: var(--border-hl); }
+
+    .tile-info { min-width: 0; }
+    .tile-count {
+      font-family: var(--font-mono); font-size: 20px; font-weight: 700;
+      color: var(--text-bright); line-height: 1;
+    }
+    .tile-name {
+      font-family: var(--font-mono); font-size: 9px;
+      color: var(--muted); letter-spacing: .1em;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+
+    /* ── Main Content Area ───────────────────────────── */
+    .content-area {
+      display: flex; flex: 1; min-height: 0;
+    }
+
+    /* Left: tabbed panel */
+    .left-panel { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+
+    .tab-bar {
+      display: flex;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg2);
+    }
+    .tab-btn {
+      font-family: var(--font-mono); font-size: 10px;
+      letter-spacing: .15em; padding: 12px 20px;
+      border: none; border-bottom: 2px solid transparent;
+      background: transparent; color: var(--muted);
+      cursor: pointer; transition: color .15s, border-color .15s;
+    }
+    .tab-btn:hover { color: var(--text); }
+    .tab-btn.active { color: var(--green); border-bottom-color: var(--green); }
+
+    .tab-content { display: none; flex: 1; overflow: auto; }
+    .tab-content.active { display: flex; flex-direction: column; }
+
+    /* ── Fleet Table (Live Floor & Unit Stats) ─────── */
+    .fleet-table { width: 100%; border-collapse: collapse; }
+    .fleet-table th {
+      background: var(--bg2);
+      padding: 10px 14px;
+      text-align: left;
+      font-family: var(--font-mono); font-size: 9px;
+      letter-spacing: .18em; color: var(--muted);
+      border-bottom: 1px solid var(--border);
+      position: sticky; top: 0; z-index: 1;
+    }
+    .fleet-table td {
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: middle;
+    }
+    .fleet-table tbody tr { transition: background .1s; }
+    .fleet-table tbody tr:hover { background: var(--bg3); }
+
+    .unit-name {
+      font-family: var(--font-mono); font-size: 13px; font-weight: 700;
+      color: var(--text-bright); letter-spacing: .05em;
+    }
+    .state-tag {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 3px 9px;
+      font-family: var(--font-mono); font-size: 10px; letter-spacing: .1em;
+    }
+    .tag-green  { border: 1px solid var(--green-dim); color: var(--green);
+                  background: var(--green-glow); }
+    .tag-amber  { border: 1px solid var(--amber-dim); color: var(--amber);
+                  background: var(--amber-glow); }
+    .tag-blue   { border: 1px solid var(--blue);      color: var(--blue);
+                  background: var(--blue-glow); }
+    .tag-muted  { border: 1px solid var(--border-hl); color: var(--muted);
+                  background: transparent; }
+    .tag-red    { border: 1px solid var(--red); color: var(--red);
+                  background: var(--red-glow); }
+
+    .mono-val {
+      font-family: var(--font-mono); font-size: 13px;
+      color: var(--text-bright);
+    }
+    .mono-muted {
+      font-family: var(--font-mono); font-size: 11px;
+      color: var(--muted);
+    }
+    .moves-big {
+      font-family: var(--font-mono); font-size: 20px; font-weight: 700;
+      color: var(--green);
+      text-shadow: 0 0 8px var(--green-glow);
+    }
+    .moves-zero {
+      font-family: var(--font-mono); font-size: 20px; font-weight: 700;
+      color: var(--border-hl);
+    }
+
+    /* Fuel mini-bar */
+    .fuel-col { display: flex; flex-direction: column; gap: 4px; }
+    .fuel-row { display: flex; align-items: center; gap: 6px; }
+    .fuel-lbl {
+      font-family: var(--font-mono); font-size: 9px;
+      letter-spacing: .12em; color: var(--muted); width: 26px;
+    }
+    .fuel-track {
+      flex: 1; height: 4px; background: var(--border);
+    }
+    .fuel-fill { height: 100%; transition: width .4s; }
+    .fill-ok   { background: var(--green); }
+    .fill-warn { background: var(--amber); }
+    .fill-crit { background: var(--red);   }
+    .fuel-pct {
+      font-family: var(--font-mono); font-size: 10px;
+      width: 32px; text-align: right;
+    }
+    .pct-ok   { color: var(--green); }
+    .pct-warn { color: var(--amber); }
+    .pct-crit { color: var(--red);   }
+
+    /* Sensor alert */
+    .sensor-ok   { font-family: var(--font-mono); font-size: 10px; color: var(--green); }
+    .sensor-warn { font-family: var(--font-mono); font-size: 10px; color: var(--amber);
+                   animation: blink 2s step-end infinite; }
+
+    /* ── Unit Rank tab ───────────────────────────────── */
+    .rank-table { width: 100%; border-collapse: collapse; }
+    .rank-table th {
+      background: var(--bg2); padding: 10px 14px;
+      font-family: var(--font-mono); font-size: 9px;
+      letter-spacing: .18em; color: var(--muted);
+      border-bottom: 1px solid var(--border);
+      text-align: left; position: sticky; top: 0;
+    }
+    .rank-table td { padding: 10px 14px; border-bottom: 1px solid var(--border); }
+    .rank-num {
+      font-family: var(--font-mono); font-size: 11px;
+      color: var(--muted); width: 28px;
+    }
+    .rank-bar-track {
+      height: 6px; background: var(--border); flex: 1;
+    }
+    .rank-bar-fill { height: 100%; background: var(--green); transition: width .5s; }
+
+    /* ── Right Panel: Alerts + Signal Key ────────────── */
+    .right-panel {
+      width: 260px; flex-shrink: 0;
+      border-left: 1px solid var(--border);
+      display: flex; flex-direction: column;
+      background: var(--bg2);
+    }
+    .panel-block { border-bottom: 1px solid var(--border); }
+    .panel-head {
+      padding: 10px 14px;
+      font-family: var(--font-mono); font-size: 9px;
+      letter-spacing: .2em; color: var(--muted);
+      background: var(--bg);
+      border-bottom: 1px solid var(--border);
+    }
+
+    /* Alerts */
+    .alert-list { padding: 8px; display: flex; flex-direction: column; gap: 6px; }
+    .alert-none {
+      padding: 16px; text-align: center;
+      font-family: var(--font-mono); font-size: 10px;
+      color: var(--green); letter-spacing: .1em;
+    }
+    .alert-item {
+      padding: 8px 10px;
+      background: var(--bg3);
+      border-left: 2px solid var(--amber);
+    }
+    .alert-unit {
+      font-family: var(--font-mono); font-size: 11px; font-weight: 700;
+      color: var(--amber);
+    }
+    .alert-msg {
+      font-family: var(--font-mono); font-size: 10px;
+      color: var(--text); margin-top: 2px;
+    }
+
+    /* Signal Key */
+    .sig-list { padding: 8px; display: flex; flex-direction: column; gap: 1px; }
+    .sig-item {
+      display: flex; align-items: flex-start; gap: 8px;
+      padding: 7px 6px;
+    }
+    .sig-dot {
+      width: 8px; height: 8px; border-radius: 50%; margin-top: 2px; flex-shrink: 0;
+    }
+    .sig-text {}
+    .sig-title {
+      font-family: var(--font-mono); font-size: 10px; font-weight: 700;
+      color: var(--text-bright);
+    }
+    .sig-desc {
+      font-family: var(--font-mono); font-size: 9px;
+      color: var(--muted); margin-top: 1px;
+    }
+
+    /* Footer */
+    .footer {
+      padding: 10px 20px;
+      border-top: 1px solid var(--border);
+      display: flex; justify-content: space-between; align-items: center;
+      background: var(--bg);
+    }
+    .footer-left {
+      font-family: var(--font-mono); font-size: 9px;
+      letter-spacing: .12em; color: var(--muted);
+    }
+    .footer-right {
+      font-family: var(--font-mono); font-size: 9px;
+      color: var(--muted); letter-spacing: .08em;
+    }
+
+    /* Loading skeleton */
+    .skel-row td { padding: 12px 14px; }
+    .skel {
+      height: 12px; border-radius: 1px;
+      background: linear-gradient(90deg, var(--bg3) 25%, var(--border) 50%, var(--bg3) 75%);
+      background-size: 200% 100%;
+      animation: shimmer 1.5s infinite;
+    }
+    @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+  </style>
+</head>
+<body>
+
+  <!-- ══════════════════════════════════════════════════
+       CONNECTION OVERLAY
+  ══════════════════════════════════════════════════ -->
+  <div id="overlay">
+    <div class="ov-logo">SPOTTER · IQ</div>
+    <div class="ov-title">YARD COMMAND</div>
+    <div id="ov-connecting">
+      <div class="ov-status" id="ovStatus">CONNECTING TO MYGEOTAB…</div>
+      <div class="dot-loader" style="margin-top:16px;">
+        <span></span><span></span><span></span>
+      </div>
+    </div>
+    <div class="ov-error" id="ovError">
+      <div class="ov-error-icon">⚠</div>
+      <div class="ov-error-msg">CONNECTION ERROR</div>
+      <button class="retry-btn" id="retryBtn">↻ RETRY</button>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════
+       MAIN APPLICATION
+  ══════════════════════════════════════════════════ -->
+  <div id="app">
+
+    <!-- Top Bar -->
+    <div class="topbar">
+      <div class="topbar-left">
+        <div>
+          <div class="brand">FLEETSOURCE IQ · SPOTTER</div>
+          <div class="brand-title">YARD COMMAND</div>
+        </div>
+        <div class="live-pill"><div class="live-dot"></div>LIVE</div>
+        <div class="mono-muted" style="font-size:10px;">GO9 · IOX-AUX</div>
+      </div>
+      <div class="topbar-right">
+        <div>
+          <div class="ctrl-label">GROUP FILTER</div>
+          <select id="groupFilter"><option value="">All Groups</option></select>
+        </div>
+        <div>
+          <div class="ctrl-label">SHIFT ANCHOR</div>
+          <select id="shiftStart">
+            <option value="12">Rolling 12 Hrs</option>
+            <option value="5">05:00 AM · Day</option>
+            <option value="15">03:00 PM · Night</option>
+          </select>
+        </div>
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;">
+          <button class="refresh-btn" id="refreshBtn">↻ REFRESH</button>
+          <div class="last-refresh" id="lastRefresh">Not yet refreshed</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- KPI Strip -->
+    <div class="kpi-strip">
+      <div class="kpi" id="k0"><div class="kpi-label">ACTIVE UNITS</div><div class="kpi-value" id="kv0">—</div><div class="kpi-sub">Online in range</div></div>
+      <div class="kpi" id="k1"><div class="kpi-label">SHIFT MOVES</div><div class="kpi-value" id="kv1">—</div><div class="kpi-sub">Verified trailer moves</div></div>
+      <div class="kpi" id="k2"><div class="kpi-label">TRAILER MI</div><div class="kpi-value" id="kv2">—</div><div class="kpi-sub">Loaded miles today</div></div>
+      <div class="kpi" id="k3"><div class="kpi-label">BOBTAIL MI</div><div class="kpi-value" id="kv3">—</div><div class="kpi-sub">Empty miles today</div></div>
+      <div class="kpi" id="k4"><div class="kpi-label">FLEET UTIL</div><div class="kpi-value" id="kv4">—</div><div class="kpi-sub">% units moving now</div></div>
+    </div>
+
+    <!-- State Tile Row -->
+    <div class="state-grid">
+      <div class="state-tile" data-filter="trailer-move">
+        <div class="tile-dot green"></div>
+        <div class="tile-info">
+          <div class="tile-count" id="sc0">0</div>
+          <div class="tile-name">Trailer Move</div>
+        </div>
+      </div>
+      <div class="state-tile" data-filter="trailer-idle">
+        <div class="tile-dot blue"></div>
+        <div class="tile-info">
+          <div class="tile-count" id="sc1">0</div>
+          <div class="tile-name">Trailer Idle</div>
+        </div>
+      </div>
+      <div class="state-tile" data-filter="bobtail-move">
+        <div class="tile-dot amber"></div>
+        <div class="tile-info">
+          <div class="tile-count" id="sc2">0</div>
+          <div class="tile-name">Bobtail Move</div>
+        </div>
+      </div>
+      <div class="state-tile" data-filter="bobtail-idle">
+        <div class="tile-dot amber" style="opacity:.5"></div>
+        <div class="tile-info">
+          <div class="tile-count" id="sc3">0</div>
+          <div class="tile-name">Bobtail Idle</div>
+        </div>
+      </div>
+      <div class="state-tile" data-filter="no-iox">
+        <div class="tile-dot muted"></div>
+        <div class="tile-info">
+          <div class="tile-count" id="sc4">0</div>
+          <div class="tile-name">Moving (No IOX)</div>
+        </div>
+      </div>
+      <div class="state-tile" data-filter="parked">
+        <div class="tile-dot dim"></div>
+        <div class="tile-info">
+          <div class="tile-count" id="sc5">0</div>
+          <div class="tile-name">Parked / Off</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Content Area -->
+    <div class="content-area">
+
+      <!-- Left: Tabs -->
+      <div class="left-panel">
+        <div class="tab-bar">
+          <button class="tab-btn active" data-tab="live">⬤ LIVE FLOOR</button>
+          <button class="tab-btn" data-tab="stats">◈ UNIT STATS</button>
+          <button class="tab-btn" data-tab="rank">↑↓ UNIT RANK</button>
+        </div>
+
+        <!-- Tab: Live Floor -->
+        <div class="tab-content active" id="tab-live" style="overflow:auto;">
+          <table class="fleet-table">
+            <thead>
+              <tr>
+                <th>UNIT</th>
+                <th>STATE</th>
+                <th>MOVES</th>
+                <th>SPEED</th>
+                <th>SENSOR</th>
+                <th>LAST SEEN</th>
+              </tr>
+            </thead>
+            <tbody id="liveBody"></tbody>
+          </table>
+        </div>
+
+        <!-- Tab: Unit Stats -->
+        <div class="tab-content" id="tab-stats" style="overflow:auto;">
+          <table class="fleet-table">
+            <thead>
+              <tr>
+                <th>UNIT</th>
+                <th>MOVES</th>
+                <th>FUEL / DEF</th>
+                <th>ENG HRS</th>
+                <th>TRAILER MI</th>
+                <th>BOBTAIL MI</th>
+              </tr>
+            </thead>
+            <tbody id="statsBody"></tbody>
+          </table>
+        </div>
+
+        <!-- Tab: Unit Rank -->
+        <div class="tab-content" id="tab-rank" style="overflow:auto;">
+          <table class="rank-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>UNIT</th>
+                <th>MOVES (SHIFT)</th>
+                <th>MOVE BAR</th>
+                <th>STATE</th>
+              </tr>
+            </thead>
+            <tbody id="rankBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Right: Alerts + Key -->
+      <div class="right-panel">
+        <div class="panel-block" style="flex:0 0 auto;">
+          <div class="panel-head">ALERTS</div>
+          <div class="alert-list" id="alertList">
+            <div class="alert-none">NO ACTIVE ALERTS</div>
+          </div>
+        </div>
+        <div class="panel-block" style="flex:1;overflow:auto;">
+          <div class="panel-head">SIGNAL KEY</div>
+          <div class="sig-list">
+            <div class="sig-item">
+              <div class="sig-dot" style="background:var(--green);box-shadow:0 0 4px var(--green);"></div>
+              <div class="sig-text">
+                <div class="sig-title">IOX AUX1 HIGH + Moving</div>
+                <div class="sig-desc">Fifth wheel latched, in transit</div>
+              </div>
+            </div>
+            <div class="sig-item">
+              <div class="sig-dot" style="background:var(--blue);box-shadow:0 0 4px var(--blue);"></div>
+              <div class="sig-text">
+                <div class="sig-title">IOX AUX1 HIGH + Stopped</div>
+                <div class="sig-desc">Hooked, at dock / waiting</div>
+              </div>
+            </div>
+            <div class="sig-item">
+              <div class="sig-dot" style="background:var(--amber);box-shadow:0 0 4px var(--amber);"></div>
+              <div class="sig-text">
+                <div class="sig-title">IOX AUX1 LOW + Moving</div>
+                <div class="sig-desc">Repositioning without trailer</div>
+              </div>
+            </div>
+            <div class="sig-item">
+              <div class="sig-dot" style="background:var(--amber);opacity:.5;"></div>
+              <div class="sig-text">
+                <div class="sig-title">IOX AUX1 LOW + Stopped</div>
+                <div class="sig-desc">Idle bobtail — fuel waste</div>
+              </div>
+            </div>
+            <div class="sig-item">
+              <div class="sig-dot" style="background:var(--muted);"></div>
+              <div class="sig-text">
+                <div class="sig-title">Moving (No IOX-AUX)</div>
+                <div class="sig-desc">GO9 speed only</div>
+              </div>
+            </div>
+            <div class="sig-item">
+              <div class="sig-dot" style="background:var(--border-hl);"></div>
+              <div class="sig-text">
+                <div class="sig-title">Parked / Engine Off</div>
+                <div class="sig-desc">GO9 still reports fuel &amp; DEF</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div><!-- /content-area -->
+
+    <!-- Footer -->
+    <div class="footer">
+      <div class="footer-left">FleetSource Leasing · 2382 Route 130, Dayton, NJ 08810</div>
+      <div class="footer-right">SPOTTER IQ · A FLEETSOURCE IQ PRODUCT · GO9 · IOX-AUX optional · v2.0.0</div>
+    </div>
+
+  </div><!-- /app -->
+
+  <!-- ════════════════════════════════════════════════════
+       MYGEOTAB ADD-IN LOGIC
+       Handshake: geotab.addin.yardCommand
+  ════════════════════════════════════════════════════ -->
+  <script>
+  /* global geotab */
+  geotab.addin.spotterIQ = function (api, state) {
+
+    // ── Diagnostic IDs ─────────────────────────────────────────
+    var DIAG_JAW      = 'DiagnosticAuxiliary1Id';
+    var DIAG_SPEED    = 'DiagnosticSpeedId';
+    var DIAG_IGNITION = 'DiagnosticIgnitionId';
+    var DIAG_FUEL     = 'DiagnosticFuelLevelId';
+    var DIAG_DEF      = 'DiagnosticAdBlueLevelId';
+    var DIAG_ENG_HRS  = 'DiagnosticEngineHoursId';
+    var DIAG_ODO      = 'DiagnosticOdometerAdjustmentId';
+
+    var DIAG_KEYS = ['jaw','speed','ignition','fuel','def','engHours','odo'];
+    var DIAG_MAP  = {
+      jaw:      DIAG_JAW,
+      speed:    DIAG_SPEED,
+      ignition: DIAG_IGNITION,
+      fuel:     DIAG_FUEL,
+      def:      DIAG_DEF,
+      engHours: DIAG_ENG_HRS,
+      odo:      DIAG_ODO
+    };
+
+    // ── Unit Conversions ──────────────────────────────────────
+    var CONV = {
+      kphToMph:   function (v) { return v * 0.621371; },
+      secToHours: function (v) { return (v / 3600).toFixed(1); },
+      mToMiles:   function (v) { return (v * 0.000621371).toFixed(1); },
+      ratioToPct: function (v) { return Math.round(v * 100); }
+    };
+
+    // ── Thresholds ────────────────────────────────────────────
+    var MOVE_MPH          = 2;    // min speed for a valid move
+    var ALERT_IGN_HOURS   = 2;    // ignition-on duration to trigger sensor check
+    var ALERT_FAST_MPH    = 10;   // "meaningful motion" speed threshold
+    var ALERT_FAST_COUNT  = 5;    // exceedances needed
+    var OFFLINE_DAYS      = 7;    // GO9 heartbeat tolerance
+
+    // ── State ─────────────────────────────────────────────────
+    var _api      = null;
+    var _assetData = [];
+
+    // ════════════════════════════════════════════════════════
+    return {
+
+      initialize: function (api, state, callback) {
+        _api = api;
+        document.getElementById('shiftStart')
+          .addEventListener('change', function () { IQ.refresh(); });
+        document.getElementById('refreshBtn')
+          .addEventListener('click',  function () { IQ.refresh(); });
+        document.getElementById('retryBtn')
+          .addEventListener('click',  function () { IQ.refresh(); });
+
+        // Tab switching
+        var tabs = document.querySelectorAll('.tab-btn');
+        for (var i = 0; i < tabs.length; i++) {
+          tabs[i].addEventListener('click', function () {
+            document.querySelectorAll('.tab-btn').forEach(function (b) { b.classList.remove('active'); });
+            document.querySelectorAll('.tab-content').forEach(function (c) { c.classList.remove('active'); });
+            this.classList.add('active');
+            document.getElementById('tab-' + this.dataset.tab).classList.add('active');
+          });
+        }
+
+        IQ.refresh();
+        callback();
+      },
+
+      focus: function (api, state) { IQ.refresh(); },
+      blur:  function () {}
+
+    }; // end return
+
+    // ════════════════════════════════════════════════════════
+    //  Internal namespace
+    // ════════════════════════════════════════════════════════
+    var IQ = {
+
+      // ── Shift date ────────────────────────────────────────
+      fromDate: function () {
+        var opt = document.getElementById('shiftStart').value;
+        var now = new Date();
+        var d   = new Date(now);
+        if (opt === '12') {
+          d.setHours(d.getHours() - 12);
+        } else {
+          d.setHours(parseInt(opt, 10), 0, 0, 0);
+          if (d > now) d.setDate(d.getDate() - 1);
+        }
+        return d.toISOString();
+      },
+
+      // ── Orchestrator ──────────────────────────────────────
+      refresh: function () {
+        IQ.showConnecting();
+        var from = IQ.fromDate();
+        var to   = new Date().toISOString();
+
+        _api.call('Get', { typeName: 'Device' })
+          .then(function (devices) {
+            var offline = [], active = [];
+            devices.forEach(function (d) {
+              var days = (Date.now() - new Date(d.lastConnectedDate)) / 86400000;
+              (days > OFFLINE_DAYS ? offline : active).push(d);
+            });
+
+            // ── Build flat multiCall array ─────────────────
+            // For N active devices × K diagnostics, result[i*K + j]
+            // is the StatusData array for device[i], diag[j].
+            var calls = [];
+            active.forEach(function (dev) {
+              DIAG_KEYS.forEach(function (key) {
+                calls.push([
+                  'Get',
+                  {
+                    typeName: 'StatusData',
+                    search: {
+                      deviceSearch:     { id: dev.id },
+                      diagnosticSearch: { id: DIAG_MAP[key] },
+                      fromDate: from,
+                      toDate:   to
+                    }
+                  }
+                ]);
+              });
+            });
+
+            var step = DIAG_KEYS.length;
+
+            // multiCall or empty resolve
+            var p = calls.length
+              ? _api.multiCall(calls)
+              : Promise.resolve([]);
+
+            return p.then(function (allResults) {
+              _assetData = [];
+
+              active.forEach(function (dev, i) {
+                var slice = allResults.slice(i * step, i * step + step);
+                var data = {};
+                DIAG_KEYS.forEach(function (key, j) {
+                  data[key] = (slice[j] || []).sort(function (a, b) {
+                    return new Date(a.dateTime) - new Date(b.dateTime);
+                  });
+                });
+                _assetData.push(IQ.buildAsset(dev, data));
+              });
+
+              offline.forEach(function (dev) {
+                _assetData.push({
+                  name:     dev.name,
+                  state:    'OFFLINE',
+                  stateKey: 'parked',
+                  moves:    0,
+                  speedMph: 0,
+                  fuel:     null, def: null,
+                  engHrs:   null,
+                  trailerMi:0, bobtailMi: 0,
+                  lastSeen: new Date(dev.lastConnectedDate),
+                  hasIOX:   false,
+                  sensorOk: true,
+                  offline:  true,
+                  alert:    null
+                });
+              });
+
+              IQ.render();
+            });
+          })
+          .catch(function (err) {
+            console.error('[SpotterIQ]', err);
+            IQ.showError();
+          });
+      },
+
+      // ── Build asset object from raw data ──────────────────
+      buildAsset: function (dev, data) {
+        var last = function (arr) { return arr.length ? arr[arr.length - 1].data : 0; };
+
+        var lastJaw    = last(data.jaw);
+        var lastKph    = last(data.speed);
+        var lastMph    = CONV.kphToMph(lastKph);
+        var hasIOX     = data.jaw.length > 0;
+        var isLocked   = lastJaw === 1;
+        var isMoving   = lastMph > MOVE_MPH;
+
+        // State classification
+        var stateLabel, stateKey;
+        if (!hasIOX && isMoving)     { stateLabel = 'Moving (No IOX)'; stateKey = 'no-iox'; }
+        else if (isLocked && isMoving){ stateLabel = 'Trailer Move';   stateKey = 'trailer-move'; }
+        else if (isLocked)            { stateLabel = 'Trailer Idle';   stateKey = 'trailer-idle'; }
+        else if (isMoving)            { stateLabel = 'Bobtail Move';   stateKey = 'bobtail-move'; }
+        else                          { stateLabel = 'Bobtail Idle';   stateKey = 'bobtail-idle'; }
+
+        var moves      = IQ.countMoves(data.jaw, data.speed);
+        var sensorOk   = !IQ.checkAlert(data.jaw, data.speed, data.ignition);
+        var fuelPct    = data.fuel.length   ? CONV.ratioToPct(last(data.fuel))   : null;
+        var defPct     = data.def.length    ? CONV.ratioToPct(last(data.def))    : null;
+        var engHrs     = data.engHours.length ? CONV.secToHours(last(data.engHours)) : null;
+
+        // Mileage split from odometer series
+        var miles = IQ.splitMileage(data.jaw, data.odo, data.speed);
+
+        return {
+          name:      dev.name,
+          state:     stateLabel,
+          stateKey:  stateKey,
+          moves:     moves,
+          speedMph:  lastMph,
+          fuel:      fuelPct,
+          def:       defPct,
+          engHrs:    engHrs,
+          trailerMi: miles.trailer,
+          bobtailMi: miles.bobtail,
+          lastSeen:  new Date(dev.lastConnectedDate),
+          hasIOX:    hasIOX,
+          sensorOk:  sensorOk,
+          offline:   false,
+          alert:     sensorOk ? null : '⚠ Check Jaw Sensor'
+        };
+      },
+
+      // ── Move correlation: two-pointer O(n+m) ──────────────
+      // Count rising edges of jaw lock (0→1) while nearest speed
+      // sample (within ±60s) exceeds MOVE_MPH.
+      countMoves: function (jawSeries, speedSeries) {
+        if (!jawSeries.length || !speedSeries.length) return 0;
+        var moves  = 0, inMove = false, sPtr = 0;
+        var GAP_MS = 60000;
+
+        for (var i = 0; i < jawSeries.length; i++) {
+          var tJaw = new Date(jawSeries[i].dateTime).getTime();
+
+          // Advance pointer to the closest speed sample
+          while (sPtr < speedSeries.length - 1) {
+            var currDist = Math.abs(new Date(speedSeries[sPtr].dateTime).getTime() - tJaw);
+            var nextDist = Math.abs(new Date(speedSeries[sPtr + 1].dateTime).getTime() - tJaw);
+            if (nextDist <= currDist) { sPtr++; } else { break; }
+          }
+
+          var tSpeed = new Date(speedSeries[sPtr].dateTime).getTime();
+          var gap    = Math.abs(tSpeed - tJaw);
+          var mph    = gap <= GAP_MS ? CONV.kphToMph(speedSeries[sPtr].data) : 0;
+
+          var locked  = jawSeries[i].data === 1;
+          var fast    = mph > MOVE_MPH;
+
+          if (locked && fast && !inMove)              { inMove = true; }
+          else if ((!locked || !fast) && inMove)      { moves++; inMove = false; }
+        }
+        if (inMove) moves++; // move still active at window end
+        return moves;
+      },
+
+      // ── Mileage split by jaw state ────────────────────────
+      splitMileage: function (jawSeries, odoSeries, speedSeries) {
+        if (!odoSeries.length || !speedSeries.length) return { trailer: 0, bobtail: 0 };
+        var trailerM = 0, bobtailM = 0;
+        var jawPtr = 0;
+
+        for (var i = 1; i < odoSeries.length; i++) {
+          var t   = new Date(odoSeries[i].dateTime).getTime();
+          var seg = odoSeries[i].data - odoSeries[i - 1].data;
+          if (seg <= 0) continue;
+
+          // advance jaw pointer to the point nearest to this timestamp
+          while (jawPtr < jawSeries.length - 1) {
+            var d1 = Math.abs(new Date(jawSeries[jawPtr].dateTime).getTime() - t);
+            var d2 = Math.abs(new Date(jawSeries[jawPtr + 1].dateTime).getTime() - t);
+            if (d2 <= d1) { jawPtr++; } else { break; }
+          }
+
+          var isLocked = jawSeries.length ? (jawSeries[jawPtr].data === 1) : false;
+          if (isLocked) trailerM += seg;
+          else          bobtailM += seg;
+        }
+
+        return {
+          trailer: parseFloat(CONV.mToMiles(trailerM)),
+          bobtail: parseFloat(CONV.mToMiles(bobtailM))
+        };
+      },
+
+      // ── Sensor alert: all three conditions must hold ───────
+      checkAlert: function (jawSeries, speedSeries, ignSeries) {
+        if (!jawSeries.length) return false;
+        if (jawSeries.some(function (p) { return p.data === 1; })) return false;
+
+        var fastCount = speedSeries.filter(function (p) {
+          return CONV.kphToMph(p.data) > ALERT_FAST_MPH;
+        }).length;
+        if (fastCount < ALERT_FAST_COUNT) return false;
+
+        if (!ignSeries.length) return false;
+        var maxOnMs = 0, spanStart = null;
+        ignSeries.forEach(function (pt) {
+          if (pt.data === 1 && spanStart === null) {
+            spanStart = new Date(pt.dateTime).getTime();
+          } else if (pt.data === 0 && spanStart !== null) {
+            maxOnMs = Math.max(maxOnMs, new Date(pt.dateTime).getTime() - spanStart);
+            spanStart = null;
+          }
+        });
+        if (spanStart !== null) maxOnMs = Math.max(maxOnMs, Date.now() - spanStart);
+        if ((maxOnMs / 3600000) <= ALERT_IGN_HOURS) return false;
+
+        return true;
+      },
+
+      // ── Render ────────────────────────────────────────────
+      render: function () {
+        var data = _assetData;
+
+        // KPIs
+        var active     = data.filter(function (a) { return !a.offline; });
+        var totalMoves = active.reduce(function (s, a) { return s + a.moves; }, 0);
+        var movingNow  = active.filter(function (a) {
+          return a.stateKey === 'trailer-move' || a.stateKey === 'bobtail-move' || a.stateKey === 'no-iox';
+        }).length;
+        var totalTrMi  = active.reduce(function (s, a) { return s + a.trailerMi; }, 0).toFixed(1);
+        var totalBbMi  = active.reduce(function (s, a) { return s + a.bobtailMi; }, 0).toFixed(1);
+        var util       = active.length ? Math.round((movingNow / active.length) * 100) : 0;
+
+        ['kv0','kv1','kv2','kv3','kv4'].forEach(function (id, i) {
+          document.getElementById(id).textContent =
+            [active.length, totalMoves, totalTrMi, totalBbMi, util + '%'][i];
+          document.getElementById('k' + i).classList.add('loaded');
+        });
+
+        // State tile counts
+        var counts = { 'trailer-move':0,'trailer-idle':0,'bobtail-move':0,'bobtail-idle':0,'no-iox':0,'parked':0 };
+        data.forEach(function (a) {
+          if (a.offline) counts['parked']++;
+          else           counts[a.stateKey] = (counts[a.stateKey] || 0) + 1;
+        });
+        var sc = ['trailer-move','trailer-idle','bobtail-move','bobtail-idle','no-iox','parked'];
+        sc.forEach(function (key, i) {
+          document.getElementById('sc' + i).textContent = counts[key] || 0;
+        });
+
+        // Alerts
+        var alerts = data.filter(function (a) { return a.alert; });
+        var al = document.getElementById('alertList');
+        if (alerts.length === 0) {
+          al.innerHTML = '<div class="alert-none">NO ACTIVE ALERTS</div>';
+        } else {
+          al.innerHTML = alerts.map(function (a) {
+            return '<div class="alert-item">' +
+              '<div class="alert-unit">' + IQ.esc(a.name) + '</div>' +
+              '<div class="alert-msg">' + IQ.esc(a.alert) + '</div>' +
+            '</div>';
+          }).join('');
+        }
+
+        // Max moves for rank bar
+        var maxMoves = data.reduce(function (m, a) { return Math.max(m, a.moves); }, 1);
+
+        // Sort for rank
+        var ranked = data.slice().sort(function (a, b) { return b.moves - a.moves; });
+
+        // LIVE FLOOR
+        document.getElementById('liveBody').innerHTML = data.map(function (a) {
+          return IQ.liveRow(a);
+        }).join('');
+
+        // UNIT STATS
+        document.getElementById('statsBody').innerHTML = data.map(function (a) {
+          return IQ.statsRow(a);
+        }).join('');
+
+        // UNIT RANK
+        document.getElementById('rankBody').innerHTML = ranked.map(function (a, idx) {
+          return IQ.rankRow(a, idx + 1, maxMoves);
+        }).join('');
+
+        // Last refresh timestamp
+        document.getElementById('lastRefresh').textContent =
+          'Updated ' + new Date().toLocaleTimeString();
+
+        IQ.showApp();
+      },
+
+      // ── Row builders ─────────────────────────────────────
+      liveRow: function (a) {
+        var tagCls = { 'trailer-move':'tag-green','trailer-idle':'tag-blue',
+                       'bobtail-move':'tag-amber','bobtail-idle':'tag-amber',
+                       'no-iox':'tag-muted','parked':'tag-muted','OFFLINE':'tag-red' };
+        var cls = a.offline ? 'tag-red' : (tagCls[a.stateKey] || 'tag-muted');
+        var movesHtml = a.offline ? '<span class="moves-zero">—</span>'
+          : (a.moves > 0
+              ? '<span class="moves-big">' + a.moves + '</span>'
+              : '<span class="moves-zero">0</span>');
+        return '<tr>' +
+          '<td><span class="unit-name">' + IQ.esc(a.name) + '</span></td>' +
+          '<td><span class="state-tag ' + cls + '">' + IQ.esc(a.state) + '</span></td>' +
+          '<td>' + movesHtml + '</td>' +
+          '<td><span class="mono-val">' + (a.offline ? '—' : a.speedMph.toFixed(1) + ' mph') + '</span></td>' +
+          '<td>' + (a.offline ? '<span class="mono-muted">—</span>' :
+            (a.hasIOX
+              ? (a.sensorOk
+                  ? '<span class="sensor-ok">✓ OK</span>'
+                  : '<span class="sensor-warn">⚠ CHECK SENSOR</span>')
+              : '<span class="mono-muted">NO IOX</span>')) + '</td>' +
+          '<td><span class="mono-muted">' + a.lastSeen.toLocaleTimeString() + '</span></td>' +
+        '</tr>';
+      },
+
+      statsRow: function (a) {
+        return '<tr>' +
+          '<td><span class="unit-name">' + IQ.esc(a.name) + '</span></td>' +
+          '<td>' + (a.moves > 0
+            ? '<span class="moves-big">' + a.moves + '</span>'
+            : '<span class="moves-zero">0</span>') + '</td>' +
+          '<td>' + IQ.fuelCell(a.fuel, a.def) + '</td>' +
+          '<td><span class="mono-val">' + (a.engHrs || '—') + (a.engHrs ? ' hrs' : '') + '</span></td>' +
+          '<td><span class="mono-val">' + (a.trailerMi || '—') + (a.trailerMi ? ' mi' : '') + '</span></td>' +
+          '<td><span class="mono-val">' + (a.bobtailMi || '—') + (a.bobtailMi ? ' mi' : '') + '</span></td>' +
+        '</tr>';
+      },
+
+      rankRow: function (a, rank, max) {
+        var pct = max > 0 ? Math.round((a.moves / max) * 100) : 0;
+        var tagCls = { 'trailer-move':'tag-green','trailer-idle':'tag-blue',
+                       'bobtail-move':'tag-amber','bobtail-idle':'tag-amber',
+                       'no-iox':'tag-muted','parked':'tag-muted' };
+        var cls = a.offline ? 'tag-red' : (tagCls[a.stateKey] || 'tag-muted');
+        return '<tr>' +
+          '<td><span class="rank-num">#' + rank + '</span></td>' +
+          '<td><span class="unit-name">' + IQ.esc(a.name) + '</span></td>' +
+          '<td><span class="moves-big">' + a.moves + '</span></td>' +
+          '<td style="padding-right:20px;">' +
+            '<div style="display:flex;align-items:center;gap:8px;">' +
+              '<div class="rank-bar-track" style="flex:1;">' +
+                '<div class="rank-bar-fill" style="width:' + pct + '%"></div>' +
+              '</div>' +
+              '<span class="mono-muted">' + pct + '%</span>' +
+            '</div>' +
+          '</td>' +
+          '<td><span class="state-tag ' + cls + '">' + IQ.esc(a.state) + '</span></td>' +
+        '</tr>';
+      },
+
+      fuelCell: function (fuelPct, defPct) {
+        var bar = function (lbl, pct) {
+          if (pct === null) return '<div class="fuel-row"><span class="fuel-lbl">' + lbl + '</span><span class="mono-muted">—</span></div>';
+          var cls  = pct > 25 ? 'fill-ok' : pct > 10 ? 'fill-warn' : 'fill-crit';
+          var pcls = pct > 25 ? 'pct-ok'  : pct > 10 ? 'pct-warn'  : 'pct-crit';
+          return '<div class="fuel-row">' +
+            '<span class="fuel-lbl">' + lbl + '</span>' +
+            '<div class="fuel-track"><div class="fuel-fill ' + cls + '" style="width:' + pct + '%"></div></div>' +
+            '<span class="fuel-pct ' + pcls + '">' + pct + '%</span>' +
+          '</div>';
+        };
+        return '<div class="fuel-col">' + bar('FUEL', fuelPct) + bar('DEF', defPct) + '</div>';
+      },
+
+      // ── Overlay states ────────────────────────────────────
+      showConnecting: function () {
+        document.getElementById('ov-connecting').style.display = '';
+        document.getElementById('ovError').classList.remove('show');
+        document.getElementById('overlay').classList.remove('hidden');
+        document.getElementById('app').classList.remove('show');
+      },
+      showError: function () {
+        document.getElementById('ov-connecting').style.display = 'none';
+        document.getElementById('ovError').classList.add('show');
+      },
+      showApp: function () {
+        document.getElementById('overlay').classList.add('hidden');
+        document.getElementById('app').classList.add('show');
+      },
+
+      esc: function (s) {
+        return String(s || '')
+          .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+          .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+      }
+
+    }; // end IQ
+
+  }; // end addin factory
+  </script>
+</body>
+</html>
