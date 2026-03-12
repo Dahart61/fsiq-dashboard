@@ -731,9 +731,187 @@
 
   <!-- ════════════════════════════════════════════════════
        MYGEOTAB ADD-IN LOGIC
-       Handshake: geotab.addin.yardCommand
+       Handshake: geotab.addin.spotterIQ
   ════════════════════════════════════════════════════ -->
   <script>
+  /* ── Local Dev Stub ─────────────────────────────────────────────
+     When opened directly in a browser (not inside MyGeotab),
+     the `geotab` host object doesn't exist. This stub creates a
+     realistic mock so the dashboard renders for design/QA review.
+     It is completely inert inside MyGeotab — the real `geotab`
+     object is already present before this script runs.
+  ────────────────────────────────────────────────────────────────*/
+  if (typeof geotab === 'undefined') {
+    console.info('[SpotterIQ] Running in LOCAL DEV mode — using mock data.');
+
+    // Helpers to build realistic StatusData time-series
+    function makeNow() { return new Date().toISOString(); }
+    function minsAgo(m) { return new Date(Date.now() - m * 60000).toISOString(); }
+    function series(diagId, deviceId, points) {
+      return points.map(function (p) {
+        return { diagnostic: { id: diagId }, device: { id: deviceId },
+                 dateTime: p[0], data: p[1] };
+      });
+    }
+
+    // Mock devices — mirrors what api.call('Get', {typeName:'Device'}) returns
+    var MOCK_DEVICES = [
+      { id: 'b1', name: 'TICO-01', lastConnectedDate: minsAgo(2)  },
+      { id: 'b2', name: 'TICO-02', lastConnectedDate: minsAgo(5)  },
+      { id: 'b3', name: 'TICO-03', lastConnectedDate: minsAgo(8)  },
+      { id: 'b4', name: 'TICO-04', lastConnectedDate: minsAgo(15) },
+      { id: 'b5', name: 'TICO-05', lastConnectedDate: minsAgo(30) },
+      { id: 'b6', name: 'TICO-06', lastConnectedDate: minsAgo(60) },
+      { id: 'b7', name: 'TICO-07', lastConnectedDate: new Date(Date.now() - 9 * 86400000).toISOString() } // OFFLINE
+    ];
+
+    // Mock StatusData per device per diagnostic (KPH, ratios, seconds as Geotab native)
+    // Layout must match DIAG_KEYS order: jaw, speed, ignition, fuel, def, engHours, odo
+    var MOCK_STATUS = {
+      'b1': [
+        // jaw — locked + unlocked cycles (3 completed moves)
+        series('DiagnosticAuxiliary1Id', 'b1', [
+          [minsAgo(90),0],[minsAgo(80),1],[minsAgo(70),0],
+          [minsAgo(60),1],[minsAgo(50),0],[minsAgo(30),1],[minsAgo(5),1]
+        ]),
+        // speed — KPH (2 mph = ~3.2 kph)
+        series('DiagnosticSpeedId', 'b1', [
+          [minsAgo(85),18],[minsAgo(75),22],[minsAgo(65),20],
+          [minsAgo(55),16],[minsAgo(45),0],[minsAgo(35),19],[minsAgo(3),21]
+        ]),
+        // ignition
+        series('DiagnosticIgnitionId', 'b1', [
+          [minsAgo(120),1],[makeNow(),1]
+        ]),
+        // fuel (ratio 0–1)
+        series('DiagnosticFuelLevelId',   'b1', [[minsAgo(10), 0.72]]),
+        // DEF
+        series('DiagnosticAdBlueLevelId', 'b1', [[minsAgo(10), 0.58]]),
+        // engine hours (seconds)
+        series('DiagnosticEngineHoursId', 'b1', [[minsAgo(10), 18540]]),
+        // odometer (meters)
+        series('DiagnosticOdometerAdjustmentId', 'b1', [
+          [minsAgo(90),412000],[minsAgo(60),413800],[minsAgo(30),415200],[minsAgo(5),416400]
+        ])
+      ],
+      'b2': [
+        series('DiagnosticAuxiliary1Id', 'b2', [
+          [minsAgo(60),0],[minsAgo(50),1],[minsAgo(40),0],[minsAgo(20),1],[minsAgo(2),1]
+        ]),
+        series('DiagnosticSpeedId', 'b2', [
+          [minsAgo(55),14],[minsAgo(45),0],[minsAgo(25),17],[minsAgo(1),0]
+        ]),
+        series('DiagnosticIgnitionId',        'b2', [[minsAgo(70),1],[makeNow(),1]]),
+        series('DiagnosticFuelLevelId',       'b2', [[minsAgo(5), 0.45]]),
+        series('DiagnosticAdBlueLevelId',     'b2', [[minsAgo(5), 0.30]]),
+        series('DiagnosticEngineHoursId',     'b2', [[minsAgo(5), 9200]]),
+        series('DiagnosticOdometerAdjustmentId','b2',[[minsAgo(60),200000],[minsAgo(5),201200]])
+      ],
+      'b3': [
+        // bobtail move — jaw unlocked, speed > 2 mph
+        series('DiagnosticAuxiliary1Id', 'b3', [[minsAgo(30),0],[makeNow(),0]]),
+        series('DiagnosticSpeedId',      'b3', [[minsAgo(10),24],[makeNow(),19]]),
+        series('DiagnosticIgnitionId',   'b3', [[minsAgo(40),1],[makeNow(),1]]),
+        series('DiagnosticFuelLevelId',       'b3', [[minsAgo(5), 0.88]]),
+        series('DiagnosticAdBlueLevelId',     'b3', [[minsAgo(5), 0.91]]),
+        series('DiagnosticEngineHoursId',     'b3', [[minsAgo(5), 5100]]),
+        series('DiagnosticOdometerAdjustmentId','b3',[[minsAgo(30),95000],[minsAgo(5),95600]])
+      ],
+      'b4': [
+        // sensor alert scenario — jaw always 0, fast >10mph 6 times, ignition >2hrs
+        series('DiagnosticAuxiliary1Id', 'b4', [[minsAgo(130),0],[makeNow(),0]]),
+        series('DiagnosticSpeedId', 'b4', [
+          [minsAgo(120),20],[minsAgo(100),22],[minsAgo(80),18],
+          [minsAgo(60),24],[minsAgo(40),19],[minsAgo(20),21],[makeNow(),0]
+        ]),
+        series('DiagnosticIgnitionId',   'b4', [[minsAgo(140),1],[makeNow(),1]]),
+        series('DiagnosticFuelLevelId',       'b4', [[minsAgo(5), 0.19]]),
+        series('DiagnosticAdBlueLevelId',     'b4', [[minsAgo(5), 0.08]]),
+        series('DiagnosticEngineHoursId',     'b4', [[minsAgo(5), 32400]]),
+        series('DiagnosticOdometerAdjustmentId','b4',[[minsAgo(130),300000],[minsAgo(5),302800]])
+      ],
+      'b5': [
+        // idle — jaw locked, stopped
+        series('DiagnosticAuxiliary1Id', 'b5', [[minsAgo(45),1],[makeNow(),1]]),
+        series('DiagnosticSpeedId',      'b5', [[minsAgo(45),0],[makeNow(),0]]),
+        series('DiagnosticIgnitionId',   'b5', [[minsAgo(50),1],[makeNow(),1]]),
+        series('DiagnosticFuelLevelId',       'b5', [[minsAgo(5), 0.63]]),
+        series('DiagnosticAdBlueLevelId',     'b5', [[minsAgo(5), 0.77]]),
+        series('DiagnosticEngineHoursId',     'b5', [[minsAgo(5), 14400]]),
+        series('DiagnosticOdometerAdjustmentId','b5',[[minsAgo(45),500000],[minsAgo(5),500000]])
+      ],
+      'b6': [
+        // no IOX — no jaw data, just speed
+        series('DiagnosticAuxiliary1Id', 'b6', []),
+        series('DiagnosticSpeedId',      'b6', [[minsAgo(10),16],[makeNow(),12]]),
+        series('DiagnosticIgnitionId',   'b6', [[minsAgo(30),1],[makeNow(),1]]),
+        series('DiagnosticFuelLevelId',       'b6', [[minsAgo(5), 0.50]]),
+        series('DiagnosticAdBlueLevelId',     'b6', [[minsAgo(5), 0.44]]),
+        series('DiagnosticEngineHoursId',     'b6', [[minsAgo(5), 7200]]),
+        series('DiagnosticOdometerAdjustmentId','b6',[[minsAgo(30),150000],[minsAgo(5),150900]])
+      ],
+      'b7': [ [], [], [], [], [], [], [] ] // OFFLINE — no data fetched
+    };
+
+    // Mock api object — mirrors the real Geotab JS API surface
+    var mockApi = {
+      call: function (method, params) {
+        return new Promise(function (resolve) {
+          setTimeout(function () {
+            if (method === 'Get' && params.typeName === 'Device') {
+              resolve(MOCK_DEVICES);
+            } else {
+              resolve([]);
+            }
+          }, 400);
+        });
+      },
+      multiCall: function (calls) {
+        return new Promise(function (resolve) {
+          setTimeout(function () {
+            var results = calls.map(function (call) {
+              var search = call[1].search;
+              var devId  = search.deviceSearch.id;
+              var diagId = search.diagnosticSearch.id;
+              var diagOrder = [
+                'DiagnosticAuxiliary1Id',
+                'DiagnosticSpeedId',
+                'DiagnosticIgnitionId',
+                'DiagnosticFuelLevelId',
+                'DiagnosticAdBlueLevelId',
+                'DiagnosticEngineHoursId',
+                'DiagnosticOdometerAdjustmentId'
+              ];
+              var idx = diagOrder.indexOf(diagId);
+              return (MOCK_STATUS[devId] && idx >= 0) ? MOCK_STATUS[devId][idx] : [];
+            });
+            resolve(results);
+          }, 600);
+        });
+      }
+    };
+
+    // Minimal geotab stub — registers addins and auto-initializes them
+    window.geotab = {
+      addin: {},
+      _boot: function () {
+        var name = Object.keys(window.geotab.addin)[0];
+        if (!name) return;
+        var factory = window.geotab.addin[name];
+        var instance = factory(mockApi, {});
+        instance.initialize(mockApi, {}, function () {
+          console.info('[SpotterIQ] Mock initialize() complete.');
+        });
+      }
+    };
+
+    // Boot after all scripts have run
+    window.addEventListener('load', function () {
+      window.geotab._boot();
+    });
+  }
+  /* ── End Local Dev Stub ──────────────────────────────────────── */
+
   /* global geotab */
   geotab.addin.spotterIQ = function (api, state) {
 
