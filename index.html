@@ -517,8 +517,6 @@ async function refreshData() {
     if (!ds.groups && !isAdmin && userGids.length) {
       ds = { groups: userGids.map(id => ({ id })) };
     }
-    // Debug: show filter state in the update timestamp line (remove after fix confirmed)
-    T("fiq-upd", "GF: " + dbgFilter + " | ds: " + JSON.stringify(ds));
 
     const [devices, siList] = await Promise.all([
       gapi("Get", { typeName:"Device",           search:ds, resultsLimit:500 }),
@@ -769,7 +767,7 @@ async function refreshData() {
       };    });
 
     render();
-    T("fiq-upd", "Updated " + now.toLocaleTimeString([], { hour:"2-digit", minute:"2-digit", second:"2-digit" }));
+    T("fiq-upd", "GF: " + dbgFilter + " | ds.groups: " + (ds.groups ? ds.groups.map(g=>g.id).join(",") : "none") + " | devices: " + (devices?.length||0));
   } catch(e) {
     console.error("SpotterIQ:", e);
   }
