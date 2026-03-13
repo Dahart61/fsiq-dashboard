@@ -84,9 +84,7 @@
 
     <!-- FILTER BAR -->
     <div id="fiq-filter">
-      <span class="fiq-grpfilter"><label class="fiq-filterlbl">GROUP FILTER</label></span>
-      <span class="fiq-grpfilter"><select id="fiq-grpsel"></select></span>
-      <label class="fiq-filterlbl" style="margin-left:10px">SHIFT START</label>
+      <label class="fiq-filterlbl">SHIFT START</label>
       <select id="fiq-shiftsel">
         <option value="rolling12">Rolling 12 Hours</option>
         <option value="0">12:00 AM</option>
@@ -208,7 +206,6 @@ function injectVisualCSS() {
     #fiq-redrule { height:3px;background:linear-gradient(90deg,#CC0000,#FF6666,#CC0000); }
     #fiq-filter  { background:#fff;border-bottom:1px solid #CCC;padding:8px 20px;flex-wrap:wrap; }
     .fiq-filterlbl { font-size:10px;font-weight:bold;color:#555;letter-spacing:.1em;white-space:nowrap; }
-    #fiq-grpsel  { padding:5px 10px;border:1px solid #CCC;border-radius:4px;font-size:12px;min-width:200px;background:#fff;color:#1A1A1A;height:28px; }
     #fiq-shiftsel{ padding:5px 10px;border:1px solid #CCC;border-radius:4px;font-size:12px;background:#fff;color:#1A1A1A;height:28px; }
     #fiq-refbtn  { padding:5px 14px;background:#CC0000;color:#fff;border:none;border-radius:4px;font-size:10px;font-weight:bold;letter-spacing:.08em;height:28px;cursor:pointer; }
     #fiq-upd     { font-size:10px;color:#888;margin-left:auto;white-space:nowrap; }
@@ -315,7 +312,7 @@ function fl() {
 injectVisualCSS();
 
 let gApi = null, gState = null, refreshTimer = null, layoutTimer = null;
-let fleet = [], selGroup = "", userGids = [], isAdmin = false;
+let fleet = [], userGids = [], isAdmin = false;
 
 // Geotab Diagnostic IDs
 const DIAG = {
@@ -388,7 +385,6 @@ if (typeof geotab !== "undefined") {
 
         // Inject CSS and wire up DOM events (DOM is already loaded when initialize fires)
         injectVisualCSS();
-        $("fiq-grpsel") .addEventListener("change", () => { selGroup = $("fiq-grpsel").value; refreshData(); });
         $("fiq-shiftsel").addEventListener("change", () => refreshData());
         $("fiq-refbtn") .addEventListener("click",   () => refreshData());
         $("fiq-retry")  .addEventListener("click",   () => initAddin());
@@ -419,7 +415,6 @@ if (typeof geotab !== "undefined") {
   // Standalone / demo mode (not inside MyGeotab frame)
   window.addEventListener("DOMContentLoaded", () => {
     injectVisualCSS();
-    $("fiq-grpsel") .addEventListener("change", () => { selGroup = $("fiq-grpsel").value; refreshData(); });
     $("fiq-shiftsel").addEventListener("change", () => refreshData());
     $("fiq-refbtn") .addEventListener("click",   () => refreshData());
     $("fiq-retry")  .addEventListener("click",   () => initAddin());
@@ -459,61 +454,29 @@ async function initAddin() {
 }
 
 async function loadGroups() {
-  const SYS = new Set(["GroupCompanyId","GroupNothingId","GroupAssetId","GroupDriverId","GroupEVId","GroupRootId"]);
+  // Geotab's native group security scopes data automatically.
+  // We only need to: identify the current user, check admin clearance,
+  // and capture their companyGroups for the group-aware device search.
   let cu = null;
   try {
     if (gState?.credentials?.userName) {
       const u = await gapi("Get", { typeName:"User", search:{ name: gState.credentials.userName } });
       cu = u?.[0];
-      if (cu?.name) {
-        T("fiq-username", cu.name);
-      }
+      if (cu?.name) T("fiq-username", cu.name);
     }
   } catch(_) {}
 
-  // ── Admin check via Geotab security clearance ──
-  // GroupSystemSecurityId = built-in Administrator clearance in MyGeotab.
-  // We check the user's securityGroups array for this ID.
-  // Non-admins never see the group filter — their companyGroups are applied silently.
+  // Admin check — GroupSystemSecurityId = built-in Administrator clearance
   isAdmin = !!(cu?.securityGroups?.some(g =>
     g.id === "GroupSystemSecurityId" || g.security?.id === "GroupSystemSecurityId"
   ));
-
-  // Show ADMIN badge in header for admins
   const badge = $("fiq-adminbadge");
   if (badge) badge.style.display = isAdmin ? "inline-block" : "none";
 
-  // Show/hide group filter — admins only
-  const grpLabel = document.querySelector('label[for="fiq-grpsel"], .fiq-filterlbl');
-  const grpWrap  = $("fiq-grpsel");
-  // Hide both the label and select for non-admins
-  document.querySelectorAll(".fiq-grpfilter").forEach(el => {
-    el.style.display = isAdmin ? "" : "none";
-  });
-
+  // Capture user's assigned groups for group-aware API calls (SDK requirement)
   if (cu?.companyGroups?.length) {
-    const ms = new Set(cu.companyGroups.map(g => g.id));
-    userGids = [...ms];
-    if (!isAdmin) {
-      // Non-admin: silently lock to their assigned groups — no UI element shown
-      selGroup = "";  // use userGids array filter in refreshData
-      return;
-    }
+    userGids = cu.companyGroups.map(g => g.id);
   }
-
-  // Admin path: populate the group dropdown
-  const all = await gapi("Get", { typeName:"Group", resultsLimit:1000 });
-  let vis = (all || []).filter(g => g.id && !SYS.has(g.id));
-
-  const sel = $("fiq-grpsel");
-  sel.innerHTML = '<option value="">— All Groups —</option>';
-  [...vis].sort((a,b) => (a.name||"").localeCompare(b.name||""))
-    .forEach(g => {
-      const o = document.createElement("option");
-      o.value = g.id; o.textContent = g.name || g.id;
-      sel.appendChild(o);
-    });
-  if (vis.length === 1) { sel.value = vis[0].id; selGroup = vis[0].id; }
 }
 
 /* Compute shift window start from the dropdown selection */
@@ -530,10 +493,10 @@ function shiftFrom() {
 async function refreshData() {
   const btn = $("fiq-refbtn"); if (btn) btn.textContent = "↻ …";
   try {
-    // Group-aware device search (SDK requirement — always pass group context)
-    const ds = selGroup
-      ? { groups: [{ id: selGroup }] }
-      : userGids.length ? { groups: userGids.map(id => ({ id })) } : {};
+    // Group-aware device search — Geotab SDK requirement.
+    // Native Geotab security scopes visibility; userGids ensures API calls
+    // respect the user's assigned groups without any UI override.
+    const ds = userGids.length ? { groups: userGids.map(id => ({ id })) } : {};
 
     const [devices, siList] = await Promise.all([
       gapi("Get", { typeName:"Device",           search:ds, resultsLimit:500 }),
@@ -828,7 +791,6 @@ function loadDemo() {
     { id:"b7", vin:"3AKGGLD57FDGF0001", gn:"Utility Truck 201",        radio:null, unit:"Utility 201", state:"moving",  offline:false, lastSeen:new Date(), ig:true,  ax:false, ie:false, ih:false, mph:14.2, fp:61, dp:null, sm:34.1, eh:3812.4, us:0,  dur:7,  mv:0,  ss:false, shiftGal:null, gph:null,
       tl: dTl([["parked",.15],["moving",.42],["idle",.08],["moving",.35]]) },
   ];
-  $("fiq-grpsel").innerHTML = '<option value="">— Demo Mode —</option>';
   render();
   showScreen("app");
   T("fiq-upd", "Demo mode — connect to MyGeotab for live data");
