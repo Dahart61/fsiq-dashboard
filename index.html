@@ -402,6 +402,9 @@ if (typeof geotab !== "undefined") {
       focus: function() {
         // Resume auto-refresh when page is visible
         if (!refreshTimer) refreshTimer = setInterval(refreshData, 30000);
+        // Re-read native Geotab group filter when add-in comes into focus
+        // so admin's current group selection is always respected
+        refreshData();
       },
 
       blur: function() {
@@ -494,9 +497,20 @@ async function refreshData() {
   const btn = $("fiq-refbtn"); if (btn) btn.textContent = "↻ …";
   try {
     // Group-aware device search — Geotab SDK requirement.
-    // Native Geotab security scopes visibility; userGids ensures API calls
-    // respect the user's assigned groups without any UI override.
-    const ds = userGids.length ? { groups: userGids.map(id => ({ id })) } : {};
+    // For admins: respect the native MyGeotab group filter from the nav bar
+    //   via state.getGroupFilter() — admins use the UI they already know.
+    // For regular users: scope to their companyGroups automatically.
+    // Either way the Geotab server enforces visibility on top of this.
+    let ds = {};
+    if (isAdmin) {
+      try {
+        const gf = gState?.getGroupFilter ? gState.getGroupFilter() : null;
+        if (gf?.length) ds = { groups: gf.map(g => ({ id: g.id || g })) };
+        // If no native filter active, admin sees all (ds = {} = no restriction)
+      } catch(_) {}
+    } else if (userGids.length) {
+      ds = { groups: userGids.map(id => ({ id })) };
+    }
 
     const [devices, siList] = await Promise.all([
       gapi("Get", { typeName:"Device",           search:ds, resultsLimit:500 }),
