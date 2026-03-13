@@ -489,6 +489,10 @@ async function initAddin() {
   const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error("API timeout — check network or re-login to MyGeotab")), 15000));
   try {
     await Promise.race([loadGroups(), timeout]);
+    await loadShifts();
+    // Show SHIFTS tab for admins only
+    const shiftsTab = $("fiq-tab-shifts");
+    if (shiftsTab) shiftsTab.style.display = isAdmin ? "inline-flex" : "none";
     await refreshData();
     showScreen("app");
   } catch(e) {
