@@ -69,7 +69,8 @@
         <div class="fiq-kpi"><div class="fiq-kl">SHIFT MOVES</div><div class="fiq-kv" id="fiq-k-moves" style="color:#fff">—</div></div>
         <div class="fiq-kpi"><div class="fiq-kl">TRAILER MI</div><div class="fiq-kv" id="fiq-k-tmi" style="color:#1B7A1B">—</div></div>
         <div class="fiq-kpi"><div class="fiq-kl">BOBTAIL MI</div><div class="fiq-kv" id="fiq-k-bmi" style="color:#6B21A8">—</div></div>
-        <div class="fiq-kpi"><div class="fiq-kl">FLEET UTIL</div><div class="fiq-kv" id="fiq-k-util" style="color:#fff">—</div></div>
+        <div class="fiq-kpi"><div class="fiq-kl">SHIFT GAL</div><div class="fiq-kv" id="fiq-k-sgal" style="color:#fff">—</div></div>
+        <div class="fiq-kpi"><div class="fiq-kl">FLEET GPH</div><div class="fiq-kv" id="fiq-k-gph" style="color:#fff">—</div></div>
         <div id="fiq-livebadge">
           <span class="fiq-dot"><span class="fiq-dotr" style="background:#22c55e"></span><span class="fiq-dotc" style="background:#22c55e"></span></span>
           <div><div style="font-size:9px;color:#22c55e;letter-spacing:.12em;font-weight:bold">LIVE</div><div style="font-size:7px;color:#666;margin-top:1px">GO9 · IOX-AUX</div></div>
@@ -315,13 +316,14 @@ let fleet = [], selGroup = "", userGids = [];
 
 // Geotab Diagnostic IDs
 const DIAG = {
-  AUX1:     "DiagnosticAuxiliary1Id",
-  IGNITION: "DiagnosticIgnitionId",
-  SPEED:    "DiagnosticSpeedId",
-  FUEL:     "DiagnosticFuelLevelId",
-  DEF:      "DiagnosticAdBlueLevelId",
-  ODOMETER: "DiagnosticOdometerAdjustmentId",
-  ENG_HRS:  "DiagnosticEngineHoursId"
+  AUX1:      "DiagnosticAuxiliary1Id",
+  RPM:       "DiagnosticEngineSpeedId",
+  SPEED:     "DiagnosticSpeedId",
+  FUEL:      "DiagnosticFuelLevelId",
+  DEF:       "DiagnosticAdBlueLevelId",
+  ODOMETER:  "DiagnosticOdometerAdjustmentId",
+  ENG_HRS:   "DiagnosticEngineHoursId",
+  FUEL_USED: "DiagnosticFuelUsedId"
 };
 
 // State configuration — labels, colors, backgrounds, borders
@@ -515,36 +517,38 @@ async function refreshData() {
     (siList || []).forEach(si => { siMap[si.device.id] = si; });
 
     const devObjs = devices.map(d => ({ id: d.id }));
-    const now  = new Date();
-    const ago5 = new Date(now - 300000); // last 5 min for current state
-    const sf   = shiftFrom();           // shift window start
+    const now   = new Date();
+    const ago2h = new Date(now - 7200000); // 2-hr lookback — GO9 only fires ignition on state-change
+    const sf    = shiftFrom();
 
     const dk = Object.keys(DIAG);
 
-    // Parallel fetch: current state (5 min) + shift-window histories
-    const [dAll, oSh, auxHist, spdHist, ignHist] = await Promise.all([
-      // Current sensor state (last 5 min)
+    // Parallel fetch: current state (2h window) + shift-window histories
+    const [dAll, oSh, auxHist, spdHist, rpmHist, fuHist] = await Promise.all([
+      // Current sensor state — 2h window so ignition/fuel/eng hrs are captured
+      // even if the device hasn't fired that diagnostic in the last 5 minutes
       Promise.all(dk.map(k => gapi("Get", {
         typeName: "StatusData",
         search: {
           diagnosticSearch: { id: DIAG[k] },
           deviceSearch:     { devices: devObjs },
-          fromDate: ago5.toISOString(),
+          fromDate: ago2h.toISOString(),
           toDate:   now.toISOString()
         },
-        resultsLimit: devices.length * 3
+        resultsLimit: devices.length * 10
       }).catch(() => []))),
 
-      // Odometer at shift start (±10 min window) for shift miles
+      // Odometer — full shift window; take EARLIEST reading as shift-start baseline
+      // (narrow ±10 min window missed trucks that started before selection)
       gapi("Get", {
         typeName: "StatusData",
         search: {
           diagnosticSearch: { id: DIAG.ODOMETER },
           deviceSearch:     { devices: devObjs },
           fromDate: sf.toISOString(),
-          toDate:   new Date(sf.getTime() + 600000).toISOString()
+          toDate:   now.toISOString()
         },
-        resultsLimit: devices.length * 2
+        resultsLimit: devices.length * 20
       }).catch(() => []),
 
       // AUX1 history for shift (move counting + sensor safety)
@@ -571,16 +575,30 @@ async function refreshData() {
         resultsLimit: devices.length * 500
       }).catch(() => []),
 
-      // Ignition history for shift (sensor safety: ignition-on duration)
+      // RPM history for shift — replaces ignition; RPM>400 = engine running
+      // Used for: engine-on duration (sensor safety) + buildTimeline
       gapi("Get", {
         typeName: "StatusData",
         search: {
-          diagnosticSearch: { id: DIAG.IGNITION },
+          diagnosticSearch: { id: DIAG.RPM },
           deviceSearch:     { devices: devObjs },
           fromDate: sf.toISOString(),
           toDate:   now.toISOString()
         },
         resultsLimit: devices.length * 200
+      }).catch(() => []),
+
+      // FuelUsed — full shift window; earliest = baseline, latest = current
+      // Delta liters → gallons = shift fuel consumption
+      gapi("Get", {
+        typeName: "StatusData",
+        search: {
+          diagnosticSearch: { id: DIAG.FUEL_USED },
+          deviceSearch:     { devices: devObjs },
+          fromDate: sf.toISOString(),
+          toDate:   now.toISOString()
+        },
+        resultsLimit: devices.length * 20
       }).catch(() => [])
     ]);
 
@@ -605,10 +623,19 @@ async function refreshData() {
     });
 
     // Build per-device history arrays (sorted chronologically)
-    const auxMap = {}, spdMap = {}, ignMap = {};
+    const auxMap = {}, spdMap = {}, rpmMap = {}, fuMap = {};
     (auxHist || []).forEach(sd => { (auxMap[sd.device.id] = auxMap[sd.device.id] || []).push({ t: sd.dateTime, v: Number(sd.value) }); });
     (spdHist || []).forEach(sd => { (spdMap[sd.device.id] = spdMap[sd.device.id] || []).push({ t: sd.dateTime, v: Number(sd.value) }); });
-    (ignHist || []).forEach(sd => { (ignMap[sd.device.id] = ignMap[sd.device.id] || []).push({ t: sd.dateTime, v: Number(sd.value) }); });
+    (rpmHist || []).forEach(sd => { (rpmMap[sd.device.id] = rpmMap[sd.device.id] || []).push({ t: sd.dateTime, v: Number(sd.value) }); });
+    (fuHist  || []).forEach(sd => { (fuMap[sd.device.id]  = fuMap[sd.device.id]  || []).push({ t: sd.dateTime, v: Number(sd.value) }); });
+
+    // Earliest + latest FuelUsed per device across shift window
+    const fuStart = {}, fuEnd = {};
+    Object.keys(fuMap).forEach(id => {
+      const arr = fuMap[id].sort((a,b) => a.t < b.t ? -1 : 1);
+      fuStart[id] = arr[0].v;
+      fuEnd[id]   = arr[arr.length-1].v;
+    });
 
     fleet = devices.map(dev => {
       const d  = dm[dev.id]  || {};
@@ -616,17 +643,48 @@ async function refreshData() {
       const { radio, unit } = pName(dev.name);
 
       // Current state values
-      const ig  = (d.IGNITION || 0) > 0.5;
-      const ax  = (d.AUX1     || 0) > 0.5;
       const kph = si.speed !== undefined ? si.speed : (d.SPEED || 0);
-      const fp  = d.FUEL    !== undefined ? pct2(d.FUEL)    : null;
-      const dp  = d.DEF     !== undefined ? pct2(d.DEF)     : null;
-      const on  = d.ODOMETER !== undefined ? d.ODOMETER     : null;
-      const os  = smStart[dev.id] ? smStart[dev.id].val     : null;
+
+      // RPM > 400 = engine running (replaces ignition diagnostic)
+      // RPM is a continuous signal on ProPlus — far more reliable than the
+      // ignition toggle which GO9 only fires on state-change.
+      const rpmNow = d.RPM !== undefined ? d.RPM : 0;
+      const ig     = rpmNow > 400;
+
+      const ax  = (d.AUX1 || 0) > 0.5;
+      const fp  = d.FUEL     !== undefined ? pct2(d.FUEL)    : null;
+      const dp  = d.DEF      !== undefined ? pct2(d.DEF)     : null;
+      const on  = d.ODOMETER !== undefined ? d.ODOMETER      : null;
+      const os  = smStart[dev.id] ? smStart[dev.id].val      : null;
       const sm2 = (on !== null && os !== null) ? toMi(Math.max(0, on - os)) : null;
-      const eh  = d.ENG_HRS !== undefined ? r1(d.ENG_HRS) : null;
-      const ih  = d.AUX1_t  !== undefined;  // AUX1 has reported this session → IOX equipped
+      // NaN guard: ENG_HRS can return NaN if device hasn't reported yet
+      const ehRaw = d.ENG_HRS !== undefined ? Number(d.ENG_HRS) : null;
+      const eh    = ehRaw !== null && !isNaN(ehRaw) ? r1(ehRaw) : null;
+      const ih  = d.AUX1_t !== undefined;  // AUX1 has reported this session → IOX equipped
       const ie  = ih;
+
+      // ── Shift Fuel Usage ──
+      // FuelUsed is lifetime cumulative liters. Delta across shift window → gallons.
+      const fuS = fuStart[dev.id] !== undefined ? fuStart[dev.id] : null;
+      const fuE = fuEnd[dev.id]   !== undefined ? fuEnd[dev.id]   : null;
+      const shiftL   = (fuS !== null && fuE !== null) ? Math.max(0, fuE - fuS) : null;
+      const shiftGal = shiftL !== null ? r1(shiftL * 0.264172) : null;
+      // GPH = shift gallons ÷ shift engine hours (both must be valid)
+      const shiftEh  = (eh !== null && os !== null && on !== null)
+        ? (() => {
+            // Approximate shift engine hours from RPM history duration
+            const rH = (rpmMap[dev.id] || []).sort((a,b) => a.t < b.t ? -1 : 1);
+            let rOnMs = 0, lastROn = null;
+            rH.forEach(pt => {
+              if (pt.v > 400 && !lastROn) lastROn = new Date(pt.t);
+              else if (pt.v <= 400 && lastROn) { rOnMs += new Date(pt.t) - lastROn; lastROn = null; }
+            });
+            if (lastROn) rOnMs += Date.now() - lastROn;
+            return rOnMs > 0 ? r1(rOnMs / 3600000) : null;
+          })()
+        : null;
+      const gph = (shiftGal !== null && shiftEh !== null && shiftEh > 0)
+        ? r1(shiftGal / shiftEh) : null;
 
       // ── Offline detection (GO9 heartbeat: flag after 7 days of silence) ──
       const lastSeen   = new Date(dev.lastCommunicationDate || dev.lastConnectedDate || 0);
@@ -651,24 +709,32 @@ async function refreshData() {
 
       // ── Sensor Safety: "No-False-Alarm" Logic ──
       // Only flag CHECK SENSOR if ALL THREE conditions are met:
-      //   1. Ignition has been ON for > 2 hours (continuous or cumulative) this shift
+      //   1. Engine has been running (RPM>400) for > 2 hours this shift
       //   2. Speed has exceeded 16 kph (10 mph) at least 5 times
       //   3. AUX1 (fifth wheel sensor) never registered HIGH all shift
       // This prevents false alerts during yard checks (slow crawl, no hook).
       let sensorSuspect = false;
       if (ie && ih) {
-        const iH = (ignMap[dev.id] || []).sort((a,b) => a.t < b.t ? -1 : 1);
-        let ignOnMs = 0, lastIgnOn = null;
-        iH.forEach(pt => {
-          if (pt.v > 0.5 && !lastIgnOn) lastIgnOn = new Date(pt.t);
-          else if (pt.v <= 0.5 && lastIgnOn) { ignOnMs += new Date(pt.t) - lastIgnOn; lastIgnOn = null; }
+        const rH = (rpmMap[dev.id] || []).sort((a,b) => a.t < b.t ? -1 : 1);
+        let rOnMs = 0, lastROn = null;
+        rH.forEach(pt => {
+          if (pt.v > 400 && !lastROn) lastROn = new Date(pt.t);
+          else if (pt.v <= 400 && lastROn) { rOnMs += new Date(pt.t) - lastROn; lastROn = null; }
         });
-        if (lastIgnOn) ignOnMs += Date.now() - lastIgnOn; // still on
-        const ignOnHours    = ignOnMs / 3600000;
+        if (lastROn) rOnMs += Date.now() - lastROn; // still running
+        const engOnHours     = rOnMs / 3600000;
         const highSpeedCount = sH.filter(sp => sp.v > 16).length;
         const auxEverHigh    = aH.some(pt => pt.v > 0.5);
-        if (ignOnHours > 2 && highSpeedCount >= 5 && !auxEverHigh) sensorSuspect = true;
+        if (engOnHours > 2 && highSpeedCount >= 5 && !auxEverHigh) sensorSuspect = true;
       }
+
+      // Build Gantt timeline — RPM history drives engine-on/off detection
+      const tl = buildTimeline(
+        auxMap[dev.id] || [],
+        spdMap[dev.id] || [],
+        rpmMap[dev.id] || [],
+        ie, ih, sf, now
+      );
 
       return {
         id: dev.id,
@@ -681,11 +747,12 @@ async function refreshData() {
         ig, ax, ie, ih,
         mph: r1(kph * 0.621371),
         fp, dp, sm: sm2, eh,
-        us: 0, dur: 0, // utilization and duration populated by future agentic pass
+        shiftGal, gph,
+        us: 0, dur: 0,
         mv,
-        ss: sensorSuspect
-      };
-    });
+        ss: sensorSuspect,
+        tl
+      };    });
 
     render();
     T("fiq-upd", "Updated " + now.toLocaleTimeString([], { hour:"2-digit", minute:"2-digit", second:"2-digit" }));
@@ -707,19 +774,116 @@ function gapi(method, params) {
    DEMO MODE (no MyGeotab frame detected)
 ══════════════════════════════════════════════════════════════ */
 function loadDemo() {
+  // Helper: build fake timeline segments for demo units
+  function dTl(mix) {
+    let pos = 0;
+    return mix.map(([st,frac]) => {
+      const s = { left:(pos*100).toFixed(1), width:(frac*100).toFixed(1), color:ST[st]?.color||'#999', label:ST[st]?.label||st };
+      pos += frac;
+      return s;
+    });
+  }
   fleet = [
-    { id:"b1", vin:"1T9TSTA89PR825810", gn:"11974 - TICO Pro Spotter", radio:null, unit:"11974", state:"trailer-move",  offline:false, lastSeen:new Date(), ig:true,  ax:true,  ie:true,  ih:true,  mph:8.2,  fp:72, dp:61,   sm:21.6, eh:1842.3, us:84, dur:4,  mv:12, ss:false },
-    { id:"b2", vin:"1T9TSTA80PR825811", gn:"11975 - TICO Pro Spotter", radio:null, unit:"11975", state:"bobtail-idle",  offline:false, lastSeen:new Date(), ig:true,  ax:false, ie:true,  ih:true,  mph:0,    fp:18, dp:12,   sm:15.9, eh:2103.7, us:41, dur:18, mv:6,  ss:true  },
-    { id:"b3", vin:"1T9TSTA84PR825813", gn:"11976 - TICO Pro Spotter", radio:null, unit:"11976", state:"trailer-idle",  offline:false, lastSeen:new Date(), ig:true,  ax:true,  ie:true,  ih:true,  mph:0,    fp:55, dp:null, sm:15.8, eh:1677.1, us:67, dur:9,  mv:9,  ss:false },
-    { id:"b4", vin:"1T9TSTA88PR825815", gn:"11978 - TICO Pro Spotter", radio:null, unit:"11978", state:"trailer-move",  offline:false, lastSeen:new Date(), ig:true,  ax:true,  ie:true,  ih:true,  mph:9.1,  fp:88, dp:79,   sm:25.0, eh:1531.4, us:91, dur:2,  mv:15, ss:false },
-    { id:"b5", vin:"1T9TSTA8XPR825816", gn:"11979 - TICO Pro Spotter", radio:null, unit:"11979", state:"bobtail-move",  offline:false, lastSeen:new Date(), ig:true,  ax:false, ie:true,  ih:true,  mph:11.7, fp:41, dp:38,   sm:19.2, eh:1904.8, us:73, dur:3,  mv:10, ss:false },
-    { id:"b6", vin:"1T9TSTA8XPR825817", gn:"G97621211666",             radio:null, unit:"9762121166", state:"parked",   offline:false, lastSeen:new Date(), ig:false, ax:false, ie:true,  ih:false, mph:0,    fp:93, dp:88,   sm:7.3,  eh:1298.2, us:0,  dur:47, mv:4,  ss:false },
-    { id:"b7", vin:"3AKGGLD57FDGF0001", gn:"Utility Truck 201",        radio:null, unit:"Utility 201", state:"moving",  offline:false, lastSeen:new Date(), ig:true,  ax:false, ie:false, ih:false, mph:14.2, fp:61, dp:null, sm:34.1, eh:3812.4, us:0,  dur:7,  mv:0,  ss:false },
+    { id:"b1", vin:"1T9TSTA89PR825810", gn:"11974 - TICO Pro Spotter", radio:null, unit:"11974", state:"trailer-move",  offline:false, lastSeen:new Date(), ig:true,  ax:true,  ie:true,  ih:true,  mph:8.2,  fp:72, dp:61,   sm:21.6, eh:1842.3, us:84, dur:4,  mv:12, ss:false, shiftGal:7.2,  gph:0.9,
+      tl: dTl([["trailer-move",.22],["trailer-idle",.06],["trailer-move",.18],["bobtail-move",.05],["bobtail-idle",.03],["trailer-move",.2],["trailer-idle",.08],["trailer-move",.18]]) },
+    { id:"b2", vin:"1T9TSTA80PR825811", gn:"11975 - TICO Pro Spotter", radio:null, unit:"11975", state:"bobtail-idle",  offline:false, lastSeen:new Date(), ig:true,  ax:false, ie:true,  ih:true,  mph:0,    fp:18, dp:12,   sm:15.9, eh:2103.7, us:41, dur:18, mv:6,  ss:true,  shiftGal:11.4, gph:1.7,
+      tl: dTl([["bobtail-idle",.12],["trailer-move",.14],["bobtail-idle",.08],["trailer-move",.12],["bobtail-move",.06],["bobtail-idle",.18],["trailer-move",.1],["bobtail-idle",.2]]) },
+    { id:"b3", vin:"1T9TSTA84PR825813", gn:"11976 - TICO Pro Spotter", radio:null, unit:"11976", state:"trailer-idle",  offline:false, lastSeen:new Date(), ig:true,  ax:true,  ie:true,  ih:true,  mph:0,    fp:55, dp:null, sm:15.8, eh:1677.1, us:67, dur:9,  mv:9,  ss:false, shiftGal:8.1,  gph:1.1,
+      tl: dTl([["trailer-move",.18],["trailer-idle",.09],["trailer-move",.15],["bobtail-move",.05],["trailer-idle",.07],["trailer-move",.2],["trailer-idle",.11],["trailer-move",.15]]) },
+    { id:"b4", vin:"1T9TSTA88PR825815", gn:"11978 - TICO Pro Spotter", radio:null, unit:"11978", state:"trailer-move",  offline:false, lastSeen:new Date(), ig:true,  ax:true,  ie:true,  ih:true,  mph:9.1,  fp:88, dp:79,   sm:25.0, eh:1531.4, us:91, dur:2,  mv:15, ss:false, shiftGal:6.8,  gph:0.8,
+      tl: dTl([["trailer-move",.28],["trailer-idle",.04],["trailer-move",.24],["trailer-idle",.03],["trailer-move",.2],["bobtail-move",.04],["trailer-move",.17]]) },
+    { id:"b5", vin:"1T9TSTA8XPR825816", gn:"11979 - TICO Pro Spotter", radio:null, unit:"11979", state:"bobtail-move",  offline:false, lastSeen:new Date(), ig:true,  ax:false, ie:true,  ih:true,  mph:11.7, fp:41, dp:38,   sm:19.2, eh:1904.8, us:73, dur:3,  mv:10, ss:false, shiftGal:9.3,  gph:1.3,
+      tl: dTl([["trailer-move",.2],["bobtail-move",.08],["trailer-move",.16],["bobtail-idle",.06],["trailer-move",.18],["trailer-idle",.07],["bobtail-move",.1],["trailer-move",.15]]) },
+    { id:"b6", vin:"1T9TSTA8XPR825817", gn:"G97621211666",             radio:null, unit:"9762121166", state:"parked",   offline:false, lastSeen:new Date(), ig:false, ax:false, ie:true,  ih:false, mph:0,    fp:93, dp:88,   sm:7.3,  eh:1298.2, us:0,  dur:47, mv:4,  ss:false, shiftGal:3.1,  gph:null,
+      tl: dTl([["trailer-move",.12],["trailer-idle",.06],["bobtail-move",.05],["trailer-move",.1],["parked",.67]]) },
+    { id:"b7", vin:"3AKGGLD57FDGF0001", gn:"Utility Truck 201",        radio:null, unit:"Utility 201", state:"moving",  offline:false, lastSeen:new Date(), ig:true,  ax:false, ie:false, ih:false, mph:14.2, fp:61, dp:null, sm:34.1, eh:3812.4, us:0,  dur:7,  mv:0,  ss:false, shiftGal:null, gph:null,
+      tl: dTl([["parked",.15],["moving",.42],["idle",.08],["moving",.35]]) },
   ];
   $("fiq-grpsel").innerHTML = '<option value="">— Demo Mode —</option>';
   render();
   showScreen("app");
   T("fiq-upd", "Demo mode — connect to MyGeotab for live data");
+}
+
+/* ══════════════════════════════════════════════════════════════
+   GANTT TIMELINE ENGINE
+   Reconstructs per-unit state history from AUX1 + speed + ignition
+   sensor histories already fetched in refreshData().
+   Uses the same rState() truth function as the live state — fully
+   consistent. Returns segments usable by tlBar().
+══════════════════════════════════════════════════════════════ */
+
+/* Build timeline segments for one device.
+   auxH / spdH / ignH = arrays of {t: isoString, v: number}
+   ie = IOX equipped, ih = AUX1 ever reported
+   sf = shift start Date, now = current Date
+   Returns: [{left, width, color, label}] in % of shift duration */
+function buildTimeline(auxH, spdH, ignH, ie, ih, sf, now) {
+  const sfMs = sf.getTime(), nowMs = now.getTime(), dur = nowMs - sfMs;
+  if (dur <= 0 || (!auxH.length && !spdH.length && !ignH.length)) return [];
+
+  // Merge all sensor events into one chronological stream
+  const evts = [];
+  auxH.forEach(p => evts.push({ t: new Date(p.t).getTime(), type:'aux', v:p.v }));
+  spdH.forEach(p => evts.push({ t: new Date(p.t).getTime(), type:'spd', v:p.v }));
+  ignH.forEach(p => evts.push({ t: new Date(p.t).getTime(), type:'ign', v:p.v }));
+  evts.sort((a,b) => a.t - b.t);
+
+  // Seed state from any readings before shift start (catches trucks already running)
+  let cIg = false, cAx = false, cKph = 0;
+  evts.filter(e => e.t < sfMs).forEach(e => {
+    if (e.type==='ign') cIg  = e.v > 400; // RPM>400 = engine on
+    if (e.type==='aux') cAx  = e.v > 0.5;
+    if (e.type==='spd') cKph = e.v;
+  });
+
+  // Walk through shift-window events, recording state transitions
+  const segs = [];
+  let segStart = sfMs;
+  let curSt = rState(cIg, cAx, cKph, ie, ih);
+
+  evts.filter(e => e.t >= sfMs && e.t <= nowMs).forEach(ev => {
+    if (ev.t > segStart) {
+      segs.push({ s: segStart, e: ev.t, st: curSt });
+      segStart = ev.t;
+    }
+    if (ev.type==='ign') cIg  = ev.v > 400; // RPM history passed as 'ign' type
+    if (ev.type==='aux') cAx  = ev.v > 0.5;
+    if (ev.type==='spd') cKph = ev.v;
+    curSt = rState(cIg, cAx, cKph, ie, ih);
+  });
+
+  // Close the final segment to now
+  if (segStart < nowMs) segs.push({ s: segStart, e: nowMs, st: curSt });
+
+  // Convert to % positions; merge adjacent same-color segments
+  const out = [];
+  segs.forEach(s => {
+    const w   = (s.e - s.s) / dur * 100;
+    const col = ST[s.st]?.color || '#999';
+    const lbl = ST[s.st]?.label || s.st;
+    if (out.length && out[out.length-1].color === col) {
+      out[out.length-1].width = (parseFloat(out[out.length-1].width) + w).toFixed(2);
+    } else {
+      out.push({ left: ((s.s - sfMs) / dur * 100).toFixed(2), width: w.toFixed(2), color: col, label: lbl });
+    }
+  });
+  return out;
+}
+
+/* Render a color-coded Gantt strip.
+   h = bar height px; footer = show "shift timeline" label */
+function tlBar(segs, h=10, footer=true) {
+  const bars = (segs||[]).map(s =>
+    `<div title="${s.label}" style="position:absolute;top:0;bottom:0;left:${s.left}%;width:${Math.max(0.4,parseFloat(s.width))}%;background:${s.color}"></div>`
+  ).join('');
+  const track = bars
+    ? `<div style="position:relative;height:${h}px;background:#E0E0E0;border-radius:${Math.ceil(h/2)}px;overflow:hidden">${bars}</div>`
+    : `<div style="height:${h}px;background:#EBEBEB;border-radius:${Math.ceil(h/2)}px"></div>`;
+  const ft = footer
+    ? `<div style="font-size:7px;color:#BBB;margin-top:2px;text-align:right;letter-spacing:.05em">◀ shift timeline</div>`
+    : '';
+  return `<div style="margin-top:4px;margin-bottom:1px">${track}${ft}</div>`;
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -729,14 +893,20 @@ function render() { kpis(); strip(); cards(); stats(); rank(); setTimeout(fl, 20
 
 function kpis() {
   const act = fleet.filter(t => t.state !== "parked");
-  const ix  = act.filter(t => t.ie);
-  const avg = ix.length ? Math.round(ix.reduce((a,t) => a + t.us, 0) / ix.length) : 0;
   T("fiq-k-active", act.length);
   T("fiq-k-moves",  fleet.reduce((a,t) => a + t.mv, 0));
   T("fiq-k-tmi",    r1(fleet.filter(t => t.state.includes("trailer")).reduce((a,t) => a + (t.sm||0), 0)));
   T("fiq-k-bmi",    r1(fleet.filter(t => t.state.includes("bobtail")).reduce((a,t) => a + (t.sm||0), 0)));
-  T("fiq-k-util",   avg + "%");
-  const ku = $("fiq-k-util"); if (ku) ku.style.color = avg>=70?"#1B5E20":avg>=50?"#B87800":"#CC0000";
+
+  // Fleet shift gallons — sum of all units with valid shiftGal
+  const galUnits = fleet.filter(t => t.shiftGal !== null);
+  const totalGal = galUnits.length ? r1(galUnits.reduce((a,t) => a + t.shiftGal, 0)) : null;
+  T("fiq-k-sgal", totalGal !== null ? totalGal + " gal" : "—");
+
+  // Fleet GPH — average of units with valid gph (no threshold coloring per spec)
+  const gphUnits = fleet.filter(t => t.gph !== null && t.gph > 0);
+  const avgGph   = gphUnits.length ? r1(gphUnits.reduce((a,t) => a + t.gph, 0) / gphUnits.length) : null;
+  T("fiq-k-gph", avgGph !== null ? avgGph + " gph" : "—");
 }
 
 function strip() {
@@ -801,6 +971,8 @@ function frow(t) {
     </div>
     <div class="fiq-fc"><div class="fiq-fclbl">MILES (SHIFT)</div><div class="fiq-fcval">${t.sm!==null?t.sm:"—"}<span style="font-size:8px;color:#888"> mi</span></div></div>
     <div class="fiq-fc"><div class="fiq-fclbl">ENG HOURS</div><div class="fiq-fcval">${t.eh!==null?t.eh:"—"}<span style="font-size:8px;color:#888"> hr</span></div></div>
+    <div class="fiq-fc"><div class="fiq-fclbl">SHIFT GAL</div><div class="fiq-fcval">${t.shiftGal!==null?t.shiftGal:"—"}<span style="font-size:8px;color:#888"> gal</span></div></div>
+    <div class="fiq-fc"><div class="fiq-fclbl">GPH</div><div class="fiq-fcval">${t.gph!==null?t.gph:"—"}<span style="font-size:8px;color:#888"> gph</span></div></div>
   </div>`;
 }
 
@@ -834,11 +1006,12 @@ function cards() {
           ${t.ss ? `<span class="fiq-blink" style="font-size:8px;color:#3B5BDB;font-weight:bold">🔧 CHECK SENSOR</span>` : ""}
         </div>
         ${pk
-          ? `<div style="font-size:8px;color:#888;display:flex;gap:12px;flex-wrap:wrap"><span>Parked <strong>${fmt(t.dur)}</strong></span>${ib(t)}</div>`
-          : t.ie
-            ? `<div class="fiq-sbar"><div style="flex:${t.us};height:6px;border-radius:2px;background:#1B7A1B"></div><div style="flex:15;height:6px;border-radius:2px;background:#B87800"></div><div style="flex:10;height:6px;border-radius:2px;background:#6B21A8"></div><div style="flex:${Math.max(0,75-t.us)};height:6px;border-radius:2px;background:#CC0000"></div><span style="font-size:8px;color:#888;margin-left:7px;flex-shrink:0">shift</span></div>`
-            : `<div style="font-size:8px;color:#3B5BDB;margin-top:3px">GPS only — IOX-AUX not installed</div>`
+          ? `<div style="font-size:8px;color:#888;display:flex;gap:12px;flex-wrap:wrap;margin-bottom:2px"><span>Parked <strong>${fmt(t.dur)}</strong></span>${ib(t)}</div>`
+          : !t.ie
+          ? `<div style="font-size:8px;color:#3B5BDB;margin-top:2px;margin-bottom:2px">GPS only — IOX-AUX not installed</div>`
+          : ""
         }
+        ${tlBar(t.tl, 10, true)}
       </div>
       <div class="fiq-cright">
         <div style="text-align:center"><div style="font-size:20px;font-weight:bold;color:#1A1A1A;line-height:1">${t.mv||"—"}</div><div style="font-size:8px;color:#888;margin-top:2px">MOVES</div></div>
@@ -847,7 +1020,7 @@ function cards() {
       <div class="fiq-mini">
         <div class="fiq-mc"><span class="fiq-mclbl">Shift Mi</span><span class="fiq-mcval">${t.sm!==null?t.sm+" mi":"—"}</span></div>
         <div class="fiq-mc"><span class="fiq-mclbl">Eng Hrs</span><span class="fiq-mcval">${t.eh!==null?t.eh+" hr":"—"}</span></div>
-        <div class="fiq-mc"><span class="fiq-mclbl">${t.ie?"Util":"IOX"}</span><span class="fiq-mcval" style="color:${t.ie?sc(t.us):"#3B5BDB"}">${t.ie?t.us+"%":"None"}</span></div>
+        <div class="fiq-mc"><span class="fiq-mclbl">GPH</span><span class="fiq-mcval">${t.gph!==null?t.gph:"—"}</span></div>
         <div class="fiq-mc"><span class="fiq-mclbl">5th Wheel</span><span class="fiq-mcval" style="color:${fwColor}">${fwLabel}</span></div>
       </div>
       ${frow(t)}
@@ -925,7 +1098,7 @@ function stats() {
         <div>
           <div class="fiq-colrule"></div><span class="fiq-ch">ENGINE</span>
           <div class="fiq-sbox"><span class="fiq-slbl">Engine Hours</span><div class="fiq-sval">${t.eh!==null?t.eh:"—"} hr</div></div>
-          <div class="fiq-sbox"><span class="fiq-slbl">Ignition</span><div class="fiq-sval" style="color:${t.ig?"#1B5E20":"#CC0000"}">${t.ig?"ON":"OFF"}</div></div>
+          <div class="fiq-sbox"><span class="fiq-slbl">RPM / Engine</span><div class="fiq-sval" style="color:${t.ig?"#1B5E20":"#CC0000"}">${t.ig?"RUNNING":"OFF"}</div></div>
         </div>
         <div>
           <div class="fiq-colrule"></div><span class="fiq-ch">FIFTH WHEEL</span>
@@ -953,6 +1126,23 @@ function stats() {
               ? `<div class="fiq-sval" style="color:${dc}">${t.dp}%</div><div class="fiq-gauge"><div class="fiq-gf" style="width:${t.dp}%;background:${dc}"></div></div>`
               : `<div style="font-size:10px;color:#888;font-style:italic">Not broadcast</div>`}
           </div>
+          <div class="fiq-sbox">
+            <span class="fiq-slbl">Shift Gallons</span>
+            <div class="fiq-sval">${t.shiftGal!==null?t.shiftGal:"—"}<span style="font-size:10px;color:#888"> gal</span></div>
+          </div>
+          <div class="fiq-sbox">
+            <span class="fiq-slbl">GPH</span>
+            <div class="fiq-sval">${t.gph!==null?t.gph:"—"}<span style="font-size:10px;color:#888"> gph</span></div>
+          </div>
+        </div>
+      </div>
+      <div style="margin-top:10px;padding-top:10px;border-top:1px solid #EBEBEB">
+        <div style="font-size:8px;font-weight:bold;color:#CC0000;letter-spacing:.1em;text-transform:uppercase;margin-bottom:5px">SHIFT ACTIVITY TIMELINE</div>
+        ${tlBar(t.tl, 14, false)}
+        <div style="display:flex;gap:14px;margin-top:6px;flex-wrap:wrap">
+          ${[["#1B7A1B","Trailer Move"],["#B87800","Trailer Idling"],["#6B21A8","Bobtail Move"],["#CC0000","Bobtail Idling"],["#999","Parked"]].map(([c,l])=>
+            `<div style="display:flex;align-items:center;gap:4px"><div style="width:10px;height:10px;border-radius:2px;background:${c};flex-shrink:0"></div><span style="font-size:8px;color:#666">${l}</span></div>`
+          ).join('')}
         </div>
       </div>
     </div>`;
@@ -962,7 +1152,14 @@ function stats() {
 
 /* ── UNIT RANK ── */
 function rank() {
-  const ixA = [...fleet].filter(t => t.state!=="parked" && t.ie).sort((a,b) => b.us - a.us);
+  // Rank by GPH ascending (most fuel-efficient first); units without GPH go last
+  const ixA = [...fleet].filter(t => t.state!=="parked" && t.ie)
+    .sort((a,b) => {
+      if (a.gph === null && b.gph === null) return 0;
+      if (a.gph === null) return 1;
+      if (b.gph === null) return -1;
+      return a.gph - b.gph; // lowest GPH = most efficient = rank #1
+    });
   const noI = fleet.filter(t => t.state!=="parked" && !t.ie);
   const pk  = fleet.filter(t => t.state==="parked");
   const md  = ["🥇","🥈","🥉"];
@@ -982,7 +1179,7 @@ function rank() {
         <div class="fiq-sbox2"><span class="fiq-slbl">MOVES</span><div style="font-size:15px;font-weight:bold">${t.mv||"—"}</div></div>
         <div class="fiq-sbox2"><span class="fiq-slbl">SHIFT MI</span><div style="font-size:15px;font-weight:bold">${t.sm!==null?t.sm:"—"}</div></div>
         <div class="fiq-sbox2"><span class="fiq-slbl">ENG HRS</span><div style="font-size:15px;font-weight:bold">${t.eh!==null?t.eh:"—"}</div></div>
-        <div class="fiq-sbox2"><span class="fiq-slbl">SPEED</span><div style="font-size:15px;font-weight:bold;color:${t.mph>0?"#1B7A1B":"#888"}">${t.mph} mph</div></div>
+        <div class="fiq-sbox2"><span class="fiq-slbl">GPH</span><div style="font-size:15px;font-weight:bold">${t.gph!==null?t.gph+" gph":"—"}</div></div>
       </div>
       <div class="fiq-rg2">
         <div class="fiq-sbox2${t.fp!==null&&t.fp<=25?" fiq-sbox-al":""}">
