@@ -505,15 +505,12 @@ async function refreshData() {
     // focus() fires every time the group filter changes, so refreshData()
     // always reads the current selection.
     let ds = {};
-    let dbgFilter = "none";
     try {
       const gf = gState?.getGroupFilter ? gState.getGroupFilter() : null;
-      dbgFilter = JSON.stringify(gf);
       if (gf?.length) {
         ds = { groups: gf.map(g => typeof g === "string" ? { id: g } : { id: g.id || g }) };
       }
-    } catch(e) { dbgFilter = "ERROR: " + e.message; }
-    // Fallback for non-admins with no active filter: scope to their companyGroups
+    } catch(_) {}
     if (!ds.groups && !isAdmin && userGids.length) {
       ds = { groups: userGids.map(id => ({ id })) };
     }
@@ -767,7 +764,7 @@ async function refreshData() {
       };    });
 
     render();
-    T("fiq-upd", "GF: " + dbgFilter + " | ds.groups: " + (ds.groups ? ds.groups.map(g=>g.id).join(",") : "none") + " | devices: " + (devices?.length||0));
+    T("fiq-upd", "Updated " + now.toLocaleTimeString([], { hour:"2-digit", minute:"2-digit", second:"2-digit" }));
   } catch(e) {
     console.error("SpotterIQ:", e);
   }
